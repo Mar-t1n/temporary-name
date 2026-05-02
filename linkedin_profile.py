@@ -14,8 +14,7 @@ import requests
 from datetime import datetime
 
 
-PILOTERR_API_KEY = "484105c3-6059-45f0-9f07-6103e7c2b57c"
-
+PILOTERR_API_KEY = "95a25702-ed4e-4fe9-8280-6abf1a0cedb3"
 
 def fetch_profile(username: str) -> dict:
     linkedin_url = f"https://www.linkedin.com/in/{username}/"
