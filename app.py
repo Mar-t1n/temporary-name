@@ -5,39 +5,42 @@ Run: pip install PyQt6 opencv-python mediapipe numpy
 """
 
 import sys
-import cv2
-import numpy as np
-import mediapipe as mp
-from mediapipe.tasks import python
-from mediapipe.tasks.python import vision
 import os
 import time
 import math
 import urllib.request
 
+import cv2
+import numpy as np
+import mediapipe as mp
+from mediapipe.tasks import python
+from mediapipe.tasks.python import vision
+
 from PyQt6.QtCore import Qt, QTimer, QPointF, QRectF, pyqtSignal
 from PyQt6.QtGui import (QImage, QPixmap, QPainter, QColor, QFont, QPen,
-                         QBrush, QLinearGradient, QRadialGradient, QPainterPath,
-                         QFontDatabase)
+                         QBrush, QRadialGradient, QPainterPath)
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QLabel, QWidget,
                              QVBoxLayout, QHBoxLayout, QPushButton,
-                             QGraphicsDropShadowEffect)
+                             QGraphicsDropShadowEffect, QLineEdit, QFileDialog,
+                             QFrame)
 
-from cvModule import FaceAnalyzer, ALL_CONNECTIONS, to_px
+from cvModule import FaceAnalyzer, ALL_CONNECTIONS
 
 # ============ CONFIG ============
 GESTURE_MODEL_URL = "https://storage.googleapis.com/mediapipe-models/gesture_recognizer/gesture_recognizer/float16/1/gesture_recognizer.task"
 GESTURE_MODEL_PATH = "gesture_recognizer.task"
 
-GESTURE_HOLD_FRAMES = 12
-GESTURE_COOLDOWN = 2.0
-MISS_TOLERANCE = 4
+GESTURE_HOLD_FRAMES = 8       # how many recent frames must agree
+GESTURE_WINDOW = 12           # size of the rolling vote window
+GESTURE_COOLDOWN = 1.2
+MISS_TOLERANCE = 10           # forgive up to ~third of a second of detection gaps
 
 MODE_COLORS = {
-    "neutral": QColor(0, 255, 220),
-    "glaze":   QColor(255, 112, 196),
-    "hate":    QColor(255, 80, 80),
+    "neutral": QColor(160, 160, 170),
+    "glaze":   QColor(60, 220, 130),
+    "hate":    QColor(255, 70, 70),
 }
+ACCENT = QColor(120, 200, 255)  # UI accent independent of mode
 
 MODE_CAPTIONS = {
     "neutral": "Hold thumb sideways, up to glaze, down to hate",
@@ -50,68 +53,63 @@ if not os.path.exists(GESTURE_MODEL_PATH):
     urllib.request.urlretrieve(GESTURE_MODEL_URL, GESTURE_MODEL_PATH)
 
 
-# ============ HAND POSE CLASSIFIER ============
-# 21 hand landmarks. Fingers: index(5-8), middle(9-12), ring(13-16), pinky(17-20)
-# Thumb: 1-4.  PIP joints (proximal): 6,10,14,18.  Tip: 8,12,16,20.
+# ============ GESTURE CLASSIFIER ============
 def classify_thumb_gesture(landmarks):
-    """Return 'up', 'down', 'side', or None.
+    """Return 'up' / 'down' / 'side' / None.
 
-    Requires:
-      1) Thumb extended (tip far from MCP)
-      2) Other four fingers CURLED (tip below or near PIP joint in y, or close to palm)
-      3) Then classifies thumb direction by tip-vs-MCP vector.
+    Looser, more forgiving than before:
+      - Curl check counts a finger as curled if its tip is anywhere near
+        or past the PIP joint (1.15x slack instead of 1.05x).
+      - Only 2 of 4 fingers must be curled (the other two can be lazy).
+      - Thumb only needs to be moderately extended.
+      - Direction zones are wide and overlap-free.
     """
     if not landmarks:
         return None
 
-    # Helpers
-    def y(i): return landmarks[i].y
-    def x(i): return landmarks[i].x
-    def dist(a, b):
+    def d(a, b):
         return math.hypot(landmarks[a].x - landmarks[b].x,
                           landmarks[a].y - landmarks[b].y)
 
-    wrist = 0
-    thumb_mcp, thumb_tip = 2, 4
-
-    # 1) Thumb must be extended away from palm
-    palm_size = dist(wrist, 9)  # wrist to middle MCP
-    if palm_size < 0.05:
-        return None
-    if dist(thumb_mcp, thumb_tip) < palm_size * 0.5:
+    palm = d(0, 9)  # wrist to middle-finger MCP
+    if palm < 0.04:
         return None
 
-    # 2) Other four fingers must be curled.
-    # A curled finger: the tip is closer to the wrist than its PIP joint is.
-    # (For an extended finger, tip is farther from wrist than PIP.)
-    finger_pip_tip = [(6, 8), (10, 12), (14, 16), (18, 20)]
-    curled_count = 0
-    for pip, tip in finger_pip_tip:
-        d_pip = dist(wrist, pip)
-        d_tip = dist(wrist, tip)
-        if d_tip < d_pip * 1.05:  # tip is at or closer than PIP -> finger is curled
-            curled_count += 1
-
-    if curled_count < 3:  # allow one finger to be sloppy
+    # Thumb must be at least somewhat extended away from its base
+    if d(2, 4) < palm * 0.35:
         return None
 
-# 3) Classify thumb direction — biased toward "side" since it's harder to hold cleanly
-    dx = x(thumb_tip) - x(thumb_mcp)
-    dy = y(thumb_tip) - y(thumb_mcp)
+    # Count curled fingers — tip is curled if it's not significantly
+    # farther from wrist than the PIP joint.
+    curled = sum(1 for pip, tip in [(6, 8), (10, 12), (14, 16), (18, 20)]
+                 if d(0, tip) < d(0, pip) * 1.15)
 
-    abs_dx, abs_dy = abs(dx), abs(dy)
+    # Need at least 2 curled to count as a thumb gesture (was 3).
+    if curled < 2:
+        return None
 
-    # If horizontal component is at least 60% of vertical, call it side.
-    # This makes neutral much easier to trigger.
-    if abs_dx > abs_dy * 0.6:
+    # Direction: vector from thumb base (CMC, idx 1) to tip (idx 4)
+    # Using CMC instead of MCP gives a longer baseline = more stable angle.
+    dx = landmarks[4].x - landmarks[1].x
+    dy = landmarks[4].y - landmarks[1].y
+
+    # Use angle in degrees so the zones are intuitive.
+    # 0° = pointing right, -90° = up, 90° = down, ±180° = left
+    angle = math.degrees(math.atan2(dy, dx))
+
+    # Sideways: anything pointing roughly horizontal (mirrored ok)
+    # — within ±35° of horizontal on either side.
+    if abs(angle) < 35 or abs(angle) > 145:
         return "side"
-    # Otherwise it's clearly vertical
-    if abs_dy > abs_dx * 1.5:
-        return "down" if dy > 0 else "up"
+    # Up: between -145° and -35° (anywhere in upper half, excluding sides)
+    if -145 < angle < -35:
+        return "up"
+    # Down: between 35° and 145°
+    if 35 < angle < 145:
+        return "down"
     return None
 
 
-# ============ GESTURE DETECTOR ============
 class GestureDetector:
     def __init__(self):
         base = python.BaseOptions(model_asset_path=GESTURE_MODEL_PATH)
@@ -122,63 +120,80 @@ class GestureDetector:
         )
         self.recognizer = vision.GestureRecognizer.create_from_options(opts)
         self.start = time.time()
-        self.streak_mode = None
-        self.streak_count = 0
+
+        # Rolling window of recent classifications (per-frame raw guesses)
+        self.window = []
         self.miss_count = 0
         self.last_switch = 0.0
+
+        # The mode currently being "voted into" via the window
+        self.candidate = None
 
     def detect(self, rgb_frame):
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
         ts_ms = int((time.time() - self.start) * 1000)
         result = self.recognizer.recognize_for_video(mp_image, ts_ms)
-
         if not result.hand_landmarks:
             return None
-
-        # ALWAYS use our custom classifier - it enforces curled fingers AND
-        # supports sideways. We don't trust MediaPipe's classifier alone because
-        # an open hand with extended thumb can register as Thumb_Up.
         orient = classify_thumb_gesture(result.hand_landmarks[0])
-        mapping = {"up": "glaze", "down": "hate", "side": "neutral"}
-        return mapping.get(orient) if orient is not None else None
+        if orient is None:
+            return None
+        return {"up": "glaze", "down": "hate", "side": "neutral"}.get(orient)
 
     def update_mode(self, current_mode, target):
+        """Vote-based mode switching with miss tolerance."""
         now = time.time()
 
         if target is None:
+            # No detection this frame - tolerate up to MISS_TOLERANCE
             self.miss_count += 1
             if self.miss_count > MISS_TOLERANCE:
-                self.streak_mode = None
-                self.streak_count = 0
+                self.window.clear()
+                self.candidate = None
             return current_mode
 
         self.miss_count = 0
+        self.window.append(target)
+        if len(self.window) > GESTURE_WINDOW:
+            self.window.pop(0)
 
+        # Already on this mode and inside cooldown? freeze the vote.
         if target == current_mode and now - self.last_switch < GESTURE_COOLDOWN:
-            self.streak_mode = None
-            self.streak_count = 0
             return current_mode
 
-        if target == self.streak_mode:
-            self.streak_count += 1
-        else:
-            self.streak_mode = target
-            self.streak_count = 1
+        # Need at least HOLD_FRAMES of the same target in the recent window
+        # for a switch to commit.
+        counts = {"glaze": 0, "hate": 0, "neutral": 0}
+        for v in self.window:
+            counts[v] = counts.get(v, 0) + 1
 
-        if (self.streak_count >= GESTURE_HOLD_FRAMES
-                and target != current_mode
+        winner = max(counts, key=lambda k: counts[k])
+        if (counts[winner] >= GESTURE_HOLD_FRAMES
+                and winner != current_mode
                 and now - self.last_switch >= GESTURE_COOLDOWN):
             self.last_switch = now
-            self.streak_mode = None
-            self.streak_count = 0
-            return target
+            self.window.clear()
+            self.candidate = None
+            return winner
 
+        # Track candidate for progress ring
+        self.candidate = winner if counts[winner] > 0 else None
+    
+        # Track candidate for progress ring (but not the one we're already on)
+        if winner != current_mode and counts[winner] > 0:
+            self.candidate = winner
+        else:
+            self.candidate = None
         return current_mode
 
+
     def progress(self):
-        if self.streak_mode is None:
+        if not self.candidate:
             return 0.0, None
-        return min(1.0, self.streak_count / GESTURE_HOLD_FRAMES), self.streak_mode
+        counts = {"glaze": 0, "hate": 0, "neutral": 0}
+        for v in self.window:
+            counts[v] = counts.get(v, 0) + 1
+        return min(1.0, counts[self.candidate] / GESTURE_HOLD_FRAMES), self.candidate
 
     def close(self):
         self.recognizer.close()
@@ -186,29 +201,8 @@ class GestureDetector:
 
 # ============ HOLOGRAPHIC FACE OVERLAY ============
 class MeshRenderer:
-    """Sci-fi targeting overlay: angular wireframe, real telemetry, glitch effects."""
-
-    # Indices used as anchor points for telemetry labels
-    DATA_ANCHORS = {
-        33:  ("L_EYE", "eye_w"),       # left eye outer
-        263: ("R_EYE", "eye_w"),       # right eye outer
-        1:   ("NOSE", "nose_w"),       # nose tip
-        152: ("CHIN", "face_h"),       # chin
-        234: ("L_JAW", "jaw_w"),       # left face edge
-        454: ("R_JAW", "jaw_w"),       # right face edge
-        13:  ("LIP", "lip_r"),         # upper lip
-    }
-
-    # Diagonal cross-bracing connections — the "tech" look comes from
-    # bracing the wireframe with non-anatomical lines, not from the mesh itself.
-    BRACE_LINES = [
-        (33, 263),    # eye-to-eye
-        (33, 152),    # left eye to chin
-        (263, 152),   # right eye to chin
-        (234, 454),   # cheek-to-cheek
-        (10, 152),    # forehead to chin
-        (61, 291),    # mouth corners
-    ]
+    DATA_ANCHORS = [33, 263, 1, 152, 234, 454, 13]
+    BRACE_LINES = [(33, 263), (33, 152), (263, 152), (234, 454), (10, 152), (61, 291)]
 
     def __init__(self):
         self.t = 0
@@ -216,66 +210,45 @@ class MeshRenderer:
         self.glitch_timer = 0
         self.last_pts = None
 
-    def _real_telemetry(self, metrics, landmarks):
-        """Build dict of {anchor_idx: 'LABEL value'} from real measurements."""
+    def _telemetry(self, metrics, landmarks):
         out = {}
-        face_w = metrics.get("fwhr", 0)
-        # Eye width in normalized coords (left eye)
         if landmarks:
-            l_inner = landmarks[133]; l_outer = landmarks[33]
-            r_inner = landmarks[362]; r_outer = landmarks[263]
-            l_eye_w = math.hypot(l_inner.x - l_outer.x, l_inner.y - l_outer.y)
-            r_eye_w = math.hypot(r_inner.x - r_outer.x, r_inner.y - r_outer.y)
-            nose_w_lm = math.hypot(landmarks[129].x - landmarks[358].x,
-                                   landmarks[129].y - landmarks[358].y)
-        else:
-            l_eye_w = r_eye_w = nose_w_lm = 0
-
-        out[33] = f"L.EYE  {l_eye_w*1000:5.1f}"
-        out[263] = f"R.EYE  {r_eye_w*1000:5.1f}"
-        out[1] = f"NOSE.W {nose_w_lm*1000:5.1f}"
+            out[33] = f"L.EYE  {math.hypot(landmarks[133].x - landmarks[33].x, landmarks[133].y - landmarks[33].y) * 1000:5.1f}"
+            out[263] = f"R.EYE  {math.hypot(landmarks[362].x - landmarks[263].x, landmarks[362].y - landmarks[263].y) * 1000:5.1f}"
+            out[1] = f"NOSE.W {math.hypot(landmarks[129].x - landmarks[358].x, landmarks[129].y - landmarks[358].y) * 1000:5.1f}"
         out[152] = f"FWHR   {metrics.get('fwhr', 0):.2f}"
         out[234] = f"JAW    {metrics.get('jaw_ratio', 0):.2f}"
         out[454] = f"SYM    {metrics.get('symmetry', 0):.1f}%"
         out[13] = f"LIP.R  {metrics.get('lip_ratio', 0):.2f}"
         return out
 
-    def draw(self, painter: QPainter, pts, mode, w, h,
-             landmarks=None, metrics=None):
+    def draw(self, painter, pts, mode, w, h, landmarks=None, metrics=None):
         self.t += 1
         color = MODE_COLORS[mode]
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
-        # Face bounding box (for brackets, reticle, scan)
         xs = [p[0] for p in pts]; ys = [p[1] for p in pts]
-        fx1, fx2 = min(xs), max(xs)
-        fy1, fy2 = min(ys), max(ys)
+        fx1, fx2 = min(xs), max(xs); fy1, fy2 = min(ys), max(ys)
         face_w = fx2 - fx1; face_h = fy2 - fy1
         cx, cy = (fx1 + fx2) / 2, (fy1 + fy2) / 2
 
-        # Pre-compute z-depth for shading
-        if landmarks:
-            zs = [lm.z for lm in landmarks]
+        zs = [lm.z for lm in landmarks] if landmarks else None
+        if zs:
             z_min, z_max = min(zs), max(zs)
             z_range = max(0.001, z_max - z_min)
-        else:
-            zs = None
 
-        # ========== LAYER 1: ghost wireframe (motion trail) ==========
-        if self.last_pts is not None and len(self.last_pts) == len(pts):
+        # Ghost trail
+        if self.last_pts and len(self.last_pts) == len(pts):
             ghost = QColor(color); ghost.setAlpha(25)
             painter.setPen(QPen(ghost, 0.6))
             for a, b in ALL_CONNECTIONS:
                 painter.drawLine(self.last_pts[a][0], self.last_pts[a][1],
                                  self.last_pts[b][0], self.last_pts[b][1])
 
-        # ========== LAYER 2: depth-shaded wireframe (no glow halo) ==========
-        # Single-pass thin lines — no fat outer glow, no soft halos.
-        # Depth controls alpha so closer features are crisp, far features fade.
+        # Depth-shaded wireframe
         for a, b in ALL_CONNECTIONS:
-            if zs is not None:
-                z_avg = (zs[a] + zs[b]) / 2
-                t = 1.0 - (z_avg - z_min) / z_range  # 0=far, 1=close
+            if zs:
+                t = 1.0 - ((zs[a] + zs[b]) / 2 - z_min) / z_range
                 alpha = int(50 + 130 * t)
             else:
                 alpha = 150
@@ -283,163 +256,115 @@ class MeshRenderer:
             painter.setPen(QPen(c, 0.7))
             painter.drawLine(pts[a][0], pts[a][1], pts[b][0], pts[b][1])
 
-        # ========== LAYER 3: cross-bracing diagonals ==========
-        # These are the lines that don't follow anatomy — give it the
-        # "engineered scaffold" look instead of "skin texture" look.
-        brace_color = QColor(color); brace_color.setAlpha(110)
-        brace_pen = QPen(brace_color, 0.9)
-        brace_pen.setStyle(Qt.PenStyle.DashLine)
-        brace_pen.setDashPattern([6, 4])
-        painter.setPen(brace_pen)
+        # Cross bracing
+        brace = QColor(color); brace.setAlpha(110)
+        bp = QPen(brace, 0.9); bp.setStyle(Qt.PenStyle.DashLine); bp.setDashPattern([6, 4])
+        painter.setPen(bp)
         for a, b in self.BRACE_LINES:
             painter.drawLine(pts[a][0], pts[a][1], pts[b][0], pts[b][1])
 
-        # ========== LAYER 4: scan line with afterglow ==========
-        sweep_period = 110
-        phase = (self.t % sweep_period) / sweep_period
+        # Scan line + afterglow
+        phase = (self.t % 110) / 110
         scan_y = fy1 + face_h * phase
-
         for i in range(4):
-            offset = (i + 1) * 6
-            tr_y = scan_y - offset
-            tr_alpha = int(90 * (1 - i / 4))
-            painter.setPen(QPen(QColor(255, 255, 255, tr_alpha), 0.8))
+            tr_y = scan_y - (i + 1) * 6
+            painter.setPen(QPen(QColor(255, 255, 255, int(90 * (1 - i / 4))), 0.8))
             for a, b in ALL_CONNECTIONS:
-                ya, yb = pts[a][1], pts[b][1]
-                if min(ya, yb) <= tr_y <= max(ya, yb):
+                if min(pts[a][1], pts[b][1]) <= tr_y <= max(pts[a][1], pts[b][1]):
                     painter.drawLine(pts[a][0], pts[a][1], pts[b][0], pts[b][1])
-
         painter.setPen(QPen(QColor(255, 255, 255, 255), 1.5))
         for a, b in ALL_CONNECTIONS:
-            ya, yb = pts[a][1], pts[b][1]
-            if min(ya, yb) <= scan_y <= max(ya, yb):
+            if min(pts[a][1], pts[b][1]) <= scan_y <= max(pts[a][1], pts[b][1]):
                 painter.drawLine(pts[a][0], pts[a][1], pts[b][0], pts[b][1])
 
-        # ========== LAYER 5: angular targeting brackets ==========
-        bracket_color = QColor(color); bracket_color.setAlpha(230)
-        painter.setPen(QPen(bracket_color, 2))
+        # Targeting brackets
         breath = math.sin(self.t * 0.05) * 3
         pad = 22 + breath
         bl = max(10, face_w * 0.13)
-
-        corners = [
-            (fx1 - pad, fy1 - pad, 1, 1),    # TL: legs go right and down
-            (fx2 + pad, fy1 - pad, -1, 1),   # TR
-            (fx1 - pad, fy2 + pad, 1, -1),   # BL
-            (fx2 + pad, fy2 + pad, -1, -1),  # BR
-        ]
-        for x, y, dx, dy in corners:
+        bc = QColor(color); bc.setAlpha(230)
+        painter.setPen(QPen(bc, 2))
+        for x, y, dx, dy in [(fx1 - pad, fy1 - pad, 1, 1),
+                             (fx2 + pad, fy1 - pad, -1, 1),
+                             (fx1 - pad, fy2 + pad, 1, -1),
+                             (fx2 + pad, fy2 + pad, -1, -1)]:
             painter.drawLine(int(x), int(y), int(x + bl * dx), int(y))
             painter.drawLine(int(x), int(y), int(x), int(y + bl * dy))
 
-        # ========== LAYER 6: rotating reticle + center crosshair ==========
-        reticle_r = max(face_w, face_h) / 2 + 32 + breath
+        # Rotating reticle + crosshair
+        r = max(face_w, face_h) / 2 + 32 + breath
         rot = (self.t * 1.4) % 360
-        ret_color = QColor(color); ret_color.setAlpha(140)
-        painter.setPen(QPen(ret_color, 1.2))
+        rc = QColor(color); rc.setAlpha(140)
+        painter.setPen(QPen(rc, 1.2))
         for i in range(4):
-            start = rot + i * 90
-            painter.drawArc(QRectF(cx - reticle_r, cy - reticle_r,
-                                    reticle_r * 2, reticle_r * 2),
-                            int(start * 16), int(22 * 16))
-
-        # Tiny tick marks at cardinal points around face
-        tick_r_inner = reticle_r - 6
-        tick_r_outer = reticle_r + 6
+            painter.drawArc(QRectF(cx - r, cy - r, r * 2, r * 2),
+                            int((rot + i * 90) * 16), int(22 * 16))
         for deg in (0, 90, 180, 270):
             rad = math.radians(deg)
-            painter.drawLine(int(cx + math.cos(rad) * tick_r_inner),
-                             int(cy + math.sin(rad) * tick_r_inner),
-                             int(cx + math.cos(rad) * tick_r_outer),
-                             int(cy + math.sin(rad) * tick_r_outer))
+            painter.drawLine(int(cx + math.cos(rad) * (r - 6)),
+                             int(cy + math.sin(rad) * (r - 6)),
+                             int(cx + math.cos(rad) * (r + 6)),
+                             int(cy + math.sin(rad) * (r + 6)))
+        ch = QColor(color); ch.setAlpha(200)
+        painter.setPen(QPen(ch, 1))
+        for dx, dy in [(-10, 0), (3, 0), (0, -10), (0, 3)]:
+            painter.drawLine(int(cx + dx), int(cy + dy),
+                             int(cx + dx + (7 if dx != 0 else 0)),
+                             int(cy + dy + (7 if dy != 0 else 0)))
 
-        # Center crosshair (small, sharp)
-        ch_color = QColor(color); ch_color.setAlpha(200)
-        painter.setPen(QPen(ch_color, 1))
-        painter.drawLine(int(cx - 10), int(cy), int(cx - 3), int(cy))
-        painter.drawLine(int(cx + 3), int(cy), int(cx + 10), int(cy))
-        painter.drawLine(int(cx), int(cy - 10), int(cx), int(cy - 3))
-        painter.drawLine(int(cx), int(cy + 3), int(cx), int(cy + 10))
-
-        # ========== LAYER 7: angular landmark markers (no fat dots) ==========
-        marker_color = QColor(color); marker_color.setAlpha(220)
-        painter.setPen(QPen(marker_color, 1.2))
+        # Diamond markers
+        mc = QColor(color); mc.setAlpha(220)
+        painter.setPen(QPen(mc, 1.2))
         painter.setBrush(Qt.BrushStyle.NoBrush)
         for idx in self.DATA_ANCHORS:
             x, y = pts[idx]
-            # Small diamond outline (4px radius) — sharper than a circle
-            diamond = QPainterPath()
-            diamond.moveTo(x, y - 4)
-            diamond.lineTo(x + 4, y)
-            diamond.lineTo(x, y + 4)
-            diamond.lineTo(x - 4, y)
-            diamond.closeSubpath()
-            painter.drawPath(diamond)
-            # Small center pixel
-            painter.fillRect(int(x), int(y), 1, 1, marker_color)
+            d = QPainterPath()
+            d.moveTo(x, y - 4); d.lineTo(x + 4, y)
+            d.lineTo(x, y + 4); d.lineTo(x - 4, y); d.closeSubpath()
+            painter.drawPath(d)
 
-        # ========== LAYER 8: real telemetry labels ==========
-        telemetry = self._real_telemetry(metrics or {}, landmarks)
-
-        font = QFont("Consolas", 9)
-        font.setWeight(QFont.Weight.Bold)
+        # Telemetry labels
+        font = QFont("Consolas", 9); font.setWeight(QFont.Weight.Bold)
         painter.setFont(font)
-
-        label_color = QColor(color); label_color.setAlpha(240)
-        line_color = QColor(color); line_color.setAlpha(140)
-
-        for idx, value in telemetry.items():
+        lc = QColor(color); lc.setAlpha(140)
+        tc = QColor(color); tc.setAlpha(240)
+        for idx, value in self._telemetry(metrics or {}, landmarks).items():
             if idx >= len(pts):
                 continue
             x, y = pts[idx]
-            # Decide which side to put label on (away from face center)
             side = 1 if x > cx else -1
-            elbow_x = x + side * 35
-            elbow_y = y - 16
-            label_x = elbow_x + side * 8
-            text_w = painter.fontMetrics().horizontalAdvance(value)
+            ex, ey = x + side * 35, y - 16
+            tw = painter.fontMetrics().horizontalAdvance(value)
+            painter.setPen(QPen(lc, 1))
+            painter.drawLine(int(x), int(y), int(ex), int(ey))
+            end_x = ex + side * (8 + tw)
+            painter.drawLine(int(ex), int(ey), int(end_x), int(ey))
+            painter.drawLine(int(end_x), int(ey - 3), int(end_x), int(ey + 3))
+            painter.setPen(QPen(tc))
+            text_x = ex + side * 8 if side > 0 else ex - 8 - tw
+            painter.drawText(QPointF(text_x, ey + 3), value)
 
-            # Leader line: short out, then horizontal
-            painter.setPen(QPen(line_color, 1))
-            painter.drawLine(int(x), int(y), int(elbow_x), int(elbow_y))
-            end_x = label_x + (text_w if side > 0 else -text_w)
-            painter.drawLine(int(elbow_x), int(elbow_y), int(end_x), int(elbow_y))
-
-            # Tiny tick at label end
-            painter.drawLine(int(end_x), int(elbow_y - 3),
-                             int(end_x), int(elbow_y + 3))
-
-            # Text
-            painter.setPen(QPen(label_color))
-            text_x = label_x if side > 0 else label_x - text_w
-            painter.drawText(QPointF(text_x, elbow_y + 3), value)
-
-        # ========== LAYER 9: glitch chromatic offset ==========
+        # Glitch
         if self.glitch_timer > 0:
             self.glitch_timer -= 1
-            offset = np.random.randint(-4, 5)
+            off = np.random.randint(-4, 5)
             painter.setPen(QPen(QColor(255, 50, 50, 140), 0.8))
             for a, b in ALL_CONNECTIONS[::3]:
-                painter.drawLine(pts[a][0] + offset, pts[a][1],
-                                 pts[b][0] + offset, pts[b][1])
+                painter.drawLine(pts[a][0] + off, pts[a][1], pts[b][0] + off, pts[b][1])
             painter.setPen(QPen(QColor(50, 200, 255, 140), 0.8))
             for a, b in ALL_CONNECTIONS[1::3]:
-                painter.drawLine(pts[a][0] - offset, pts[a][1],
-                                 pts[b][0] - offset, pts[b][1])
+                painter.drawLine(pts[a][0] - off, pts[a][1], pts[b][0] - off, pts[b][1])
         elif np.random.random() < 0.006:
             self.glitch_timer = 5
 
-        # ========== LAYER 10: spark particles ==========
+        # Particles
         if self.t % 7 == 0 and len(self.particles) < 20:
-            idx = np.random.choice(list(self.DATA_ANCHORS.keys()))
+            idx = np.random.choice(self.DATA_ANCHORS)
             angle = np.random.uniform(0, math.tau)
             speed = np.random.uniform(2, 4)
-            self.particles.append({
-                "x": pts[idx][0], "y": pts[idx][1],
-                "vx": math.cos(angle) * speed, "vy": math.sin(angle) * speed,
-                "life": 18, "max": 18,
-            })
-
+            self.particles.append({"x": pts[idx][0], "y": pts[idx][1],
+                                   "vx": math.cos(angle) * speed,
+                                   "vy": math.sin(angle) * speed,
+                                   "life": 18, "max": 18})
         new_p = []
         for p in self.particles:
             p["x"] += p["vx"]; p["y"] += p["vy"]
@@ -448,16 +373,13 @@ class MeshRenderer:
             if p["life"] > 0:
                 t = p["life"] / p["max"]
                 pc = QColor(color); pc.setAlpha(int(220 * t))
-                painter.setPen(Qt.PenStyle.NoPen)
-                painter.setBrush(QBrush(pc))
-                # Square sparks instead of round — more "pixel" / "tech" feel
                 s = max(1, int(2 * t))
                 painter.fillRect(int(p["x"]), int(p["y"]), s, s, pc)
                 new_p.append(p)
         self.particles = new_p
 
         self.last_pts = list(pts)
-        
+
 
 # ============ VIDEO WIDGET ============
 class VideoWidget(QLabel):
@@ -468,148 +390,30 @@ class VideoWidget(QLabel):
         self.setMinimumSize(960, 720)
         self.setStyleSheet("background-color: #000;")
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.frame_pixmap = None
-        self.landmarks_pts = None
-        self.mode = "neutral"
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.mesh = MeshRenderer()
 
     def mousePressEvent(self, e):
         if e.button() == Qt.MouseButton.LeftButton:
+            self.setFocus()
             self.clicked.emit()
 
-    def update_frame(self, bgr_frame, landmarks_pts, landmarks_raw, metrics, mode):
-        self.landmarks_pts = landmarks_pts
-        self.mode = mode
-
+    def update_frame(self, bgr_frame, pts, raw, metrics, mode):
         h, w, _ = bgr_frame.shape
         rgb = cv2.cvtColor(bgr_frame, cv2.COLOR_BGR2RGB)
         qimg = QImage(rgb.data, w, h, w * 3, QImage.Format.Format_RGB888).copy()
-
-        if landmarks_pts is not None:
+        if pts is not None:
             painter = QPainter(qimg)
-            self.mesh.draw(painter, landmarks_pts, mode, w, h,
-                        landmarks_raw, metrics)
+            self.mesh.draw(painter, pts, mode, w, h, raw, metrics)
             painter.end()
-
         pix = QPixmap.fromImage(qimg)
         self.setPixmap(pix.scaled(self.size(),
-                                Qt.AspectRatioMode.KeepAspectRatio,
-                                Qt.TransformationMode.SmoothTransformation))
+                                  Qt.AspectRatioMode.KeepAspectRatio,
+                                  Qt.TransformationMode.SmoothTransformation))
 
 
-# ============ OVERLAY PANELS (CSS-styled) ============
-class GlassPill(QWidget):
-    def __init__(self, text="", color=QColor(0, 255, 220)):
-        super().__init__()
-        self._color = color
-        self.label = QLabel(text)
-        self.label.setStyleSheet("color: white; background: transparent;")
-        font = QFont("Segoe UI", 14)
-        font.setWeight(QFont.Weight.DemiBold)
-        self.label.setFont(font)
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(20, 10, 20, 10)
-        layout.addWidget(self.label)
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self._update_style()
-
-        # Soft drop shadow
-        shadow = QGraphicsDropShadowEffect()
-        shadow.setBlurRadius(30)
-        shadow.setColor(QColor(0, 0, 0, 180))
-        shadow.setOffset(0, 4)
-        self.setGraphicsEffect(shadow)
-
-    def _update_style(self):
-        c = self._color
-        self.setStyleSheet(f"""
-            GlassPill {{
-                background-color: rgba(15, 15, 22, 180);
-                border: 1px solid rgba({c.red()}, {c.green()}, {c.blue()}, 200);
-                border-radius: 18px;
-            }}
-        """)
-
-    def set_color(self, color: QColor):
-        self._color = color
-        self._update_style()
-
-    def set_text(self, text):
-        self.label.setText(text)
-
-
-class TransitionFlash(QWidget):
-    """Full-screen flash + mode-name burst when switching modes."""
-    def __init__(self, parent):
-        super().__init__(parent)
-        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.alpha = 0.0
-        self.text = ""
-        self.color = QColor(0, 255, 220)
-        self._timer = QTimer(self)
-        self._timer.timeout.connect(self._step)
-
-    def trigger(self, mode_name, color: QColor):
-        self.text = mode_name.upper()
-        self.color = color
-        self.alpha = 1.0
-        parent_widget = self.parentWidget()
-        if parent_widget is not None:
-            self.resize(parent_widget.size())
-        self.raise_()
-        self.show()
-        self._timer.start(16)
-
-    def _step(self):
-        self.alpha -= 0.04
-        if self.alpha <= 0:
-            self.alpha = 0
-            self.hide()
-            self._timer.stop()
-        self.update()
-
-    def paintEvent(self, e):
-        if self.alpha <= 0:
-            return
-        p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-
-        w, h = self.width(), self.height()
-
-        # Vignette flash — colored radial gradient pulse
-        grad = QRadialGradient(w / 2, h / 2, max(w, h) * 0.7)
-        c1 = QColor(self.color); c1.setAlpha(int(60 * self.alpha))
-        c2 = QColor(self.color); c2.setAlpha(0)
-        grad.setColorAt(0, c2)
-        grad.setColorAt(0.7, c2)
-        grad.setColorAt(1, c1)
-        p.fillRect(self.rect(), QBrush(grad))
-
-        # Border glow on all four edges
-        border_alpha = int(220 * self.alpha)
-        edge_color = QColor(self.color); edge_color.setAlpha(border_alpha)
-        thickness = int(8 * self.alpha) + 2
-        p.fillRect(0, 0, w, thickness, edge_color)
-        p.fillRect(0, h - thickness, w, thickness, edge_color)
-        p.fillRect(0, 0, thickness, h, edge_color)
-        p.fillRect(w - thickness, 0, thickness, h, edge_color)
-
-        # Big mode name in the center, scaling as it fades
-        scale = 1.0 + (1.0 - self.alpha) * 0.4   # grows as it fades
-        font = QFont("Segoe UI", int(72 * scale))
-        font.setWeight(QFont.Weight.Black)
-        font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 8)
-        p.setFont(font)
-
-        text_color = QColor(self.color); text_color.setAlpha(int(255 * self.alpha))
-        p.setPen(QPen(text_color))
-        rect = QRectF(0, 0, w, h)
-        p.drawText(rect, Qt.AlignmentFlag.AlignCenter, self.text)
-        
-
+# ============ OVERLAY WIDGETS ============
 class ModeBadge(QWidget):
-    """Top-left mode label."""
     def __init__(self):
         super().__init__()
         self.label = QLabel("NEUTRAL")
@@ -617,22 +421,18 @@ class ModeBadge(QWidget):
         font.setWeight(QFont.Weight.Black)
         font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 2)
         self.label.setFont(font)
-
         layout = QHBoxLayout(self)
         layout.setContentsMargins(16, 8, 16, 8)
         layout.addWidget(self.label)
-
         shadow = QGraphicsDropShadowEffect()
-        shadow.setBlurRadius(20)
-        shadow.setColor(QColor(0, 0, 0, 200))
+        shadow.setBlurRadius(20); shadow.setColor(QColor(0, 0, 0, 200))
         shadow.setOffset(0, 2)
         self.setGraphicsEffect(shadow)
+        self.set_mode("neutral", MODE_COLORS["neutral"])
 
-        self._color = QColor(0, 255, 220)
-        self._refresh()
-
-    def _refresh(self):
-        c = self._color
+    def set_mode(self, mode, color):
+        self.label.setText(mode.upper())
+        c = color
         self.label.setStyleSheet(f"color: rgb({c.red()},{c.green()},{c.blue()}); background: transparent;")
         self.setStyleSheet(f"""
             ModeBadge {{
@@ -642,19 +442,44 @@ class ModeBadge(QWidget):
             }}
         """)
 
-    def set_mode(self, mode, color: QColor):
-        self.label.setText(mode.upper())
+
+class GlassPill(QWidget):
+    def __init__(self, text="", color=ACCENT):
+        super().__init__()
         self._color = color
+        self.label = QLabel(text)
+        font = QFont("Segoe UI", 14); font.setWeight(QFont.Weight.DemiBold)
+        self.label.setFont(font)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(20, 10, 20, 10)
+        layout.addWidget(self.label)
+        shadow = QGraphicsDropShadowEffect()
+        shadow.setBlurRadius(30); shadow.setColor(QColor(0, 0, 0, 180))
+        shadow.setOffset(0, 4)
+        self.setGraphicsEffect(shadow)
         self._refresh()
+
+    def _refresh(self):
+        c = self._color
+        self.label.setStyleSheet("color: white; background: transparent;")
+        self.setStyleSheet(f"""
+            GlassPill {{
+                background-color: rgba(15, 15, 22, 180);
+                border: 1px solid rgba({c.red()},{c.green()},{c.blue()}, 200);
+                border-radius: 18px;
+            }}
+        """)
+
+    def set_text(self, text): self.label.setText(text)
+    def set_color(self, color): self._color = color; self._refresh()
 
 
 class ProgressRing(QWidget):
-    """Bottom-left ring showing gesture hold progress."""
     def __init__(self):
         super().__init__()
         self.setFixedSize(110, 56)
         self.progress = 0.0
-        self.color = QColor(0, 255, 220)
+        self.color = MODE_COLORS["neutral"]
         self.label_text = ""
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
 
@@ -672,34 +497,221 @@ class ProgressRing(QWidget):
             return
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
-
         cx, cy, r = 24, 28, 18
-
-        # Background ring
-        bg_pen = QPen(QColor(60, 60, 70, 220), 3)
-        p.setPen(bg_pen)
+        p.setPen(QPen(QColor(60, 60, 70, 220), 3))
         p.drawEllipse(QPointF(cx, cy), r, r)
-
-        # Progress arc
-        arc_pen = QPen(self.color, 3)
-        arc_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        p.setPen(arc_pen)
-        span = int(360 * 16 * self.progress)
-        p.drawArc(QRectF(cx - r, cy - r, r * 2, r * 2), 90 * 16, -span)
-
-        # Inner dot
-        p.setBrush(QBrush(self.color))
-        p.setPen(Qt.PenStyle.NoPen)
+        arc = QPen(self.color, 3); arc.setCapStyle(Qt.PenCapStyle.RoundCap)
+        p.setPen(arc)
+        p.drawArc(QRectF(cx - r, cy - r, r * 2, r * 2),
+                  90 * 16, -int(360 * 16 * self.progress))
+        p.setBrush(QBrush(self.color)); p.setPen(Qt.PenStyle.NoPen)
         p.drawEllipse(QPointF(cx, cy), 5, 5)
-
-        # Label
-        font = QFont("Segoe UI", 10)
-        font.setWeight(QFont.Weight.Bold)
+        font = QFont("Segoe UI", 10); font.setWeight(QFont.Weight.Bold)
         font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 1)
         p.setFont(font)
         p.setPen(QPen(self.color))
         p.drawText(QRectF(cx + r + 8, 0, 80, self.height()),
                    Qt.AlignmentFlag.AlignVCenter, self.label_text)
+
+
+class TransitionFlash(QWidget):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.alpha = 0.0
+        self.text = ""
+        self.color = MODE_COLORS["neutral"]
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._step)
+
+    def trigger(self, mode_name, color):
+        self.text = mode_name.upper()
+        self.color = color
+        self.alpha = 1.0
+        parent = self.parent()
+        # parent() may return a generic QObject; ensure it has a QWidget size()
+        if isinstance(parent, QWidget):
+            self.resize(parent.size())
+        self.raise_(); self.show()
+        self._timer.start(16)
+
+    def _step(self):
+        self.alpha -= 0.04
+        if self.alpha <= 0:
+            self.alpha = 0; self.hide(); self._timer.stop()
+        self.update()
+
+    def paintEvent(self, e):
+        if self.alpha <= 0:
+            return
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w, h = self.width(), self.height()
+        grad = QRadialGradient(w / 2, h / 2, max(w, h) * 0.7)
+        c1 = QColor(self.color); c1.setAlpha(int(60 * self.alpha))
+        c2 = QColor(self.color); c2.setAlpha(0)
+        grad.setColorAt(0, c2); grad.setColorAt(0.7, c2); grad.setColorAt(1, c1)
+        p.fillRect(self.rect(), QBrush(grad))
+        edge = QColor(self.color); edge.setAlpha(int(220 * self.alpha))
+        thickness = int(8 * self.alpha) + 2
+        p.fillRect(0, 0, w, thickness, edge)
+        p.fillRect(0, h - thickness, w, thickness, edge)
+        p.fillRect(0, 0, thickness, h, edge)
+        p.fillRect(w - thickness, 0, thickness, h, edge)
+        scale = 1.0 + (1.0 - self.alpha) * 0.4
+        font = QFont("Segoe UI", int(72 * scale)); font.setWeight(QFont.Weight.Black)
+        font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 8)
+        p.setFont(font)
+        text_color = QColor(self.color); text_color.setAlpha(int(255 * self.alpha))
+        p.setPen(QPen(text_color))
+        p.drawText(QRectF(0, 0, w, h), Qt.AlignmentFlag.AlignCenter, self.text)
+
+
+# ============ PROFILE PANEL (always visible, bottom-right) ============
+class ProfilePanel(QFrame):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.setObjectName("profilePanel")
+        self.setFixedSize(320, 290)
+        self.data = {"github": "", "linkedin": "", "resume_path": ""}
+
+        accent = ACCENT
+        ar, ag, ab = accent.red(), accent.green(), accent.blue()
+        self.setStyleSheet(f"""
+            #profilePanel {{
+                background-color: rgba(15, 15, 22, 210);
+                border: 1px solid rgba(255, 255, 255, 35);
+                border-radius: 14px;
+            }}
+            QLabel#sectionLabel {{
+                color: rgba(160, 160, 180, 255);
+                font-size: 9px;
+                font-weight: 700;
+                letter-spacing: 1.5px;
+                background: transparent;
+            }}
+            QLabel#title {{
+                color: white;
+                font-size: 11px;
+                font-weight: 800;
+                letter-spacing: 2px;
+                background: transparent;
+            }}
+            QLabel#prefix {{
+                color: rgba(140, 140, 160, 255);
+                font-size: 12px;
+                background: transparent;
+                padding: 0 2px 0 8px;
+            }}
+            QLineEdit {{
+                background: transparent;
+                border: none;
+                color: white;
+                padding: 6px 4px;
+                font-size: 12px;
+                selection-background-color: rgba({ar},{ag},{ab}, 100);
+            }}
+            QFrame#prefixGroup {{
+                background-color: rgba(0, 0, 0, 110);
+                border: 1px solid rgba(255, 255, 255, 30);
+                border-radius: 7px;
+            }}
+            QFrame#prefixGroup:focus-within {{
+                border: 1px solid rgba({ar},{ag},{ab}, 200);
+            }}
+            QPushButton#fileBtn {{
+                background-color: rgba(0, 0, 0, 110);
+                border: 1px dashed rgba(255, 255, 255, 50);
+                border-radius: 7px;
+                color: rgba(200, 200, 220, 255);
+                padding: 9px 12px;
+                text-align: left;
+                font-size: 11px;
+            }}
+            QPushButton#fileBtn:hover {{
+                border: 1px dashed rgba({ar},{ag},{ab}, 200);
+                color: white;
+            }}
+            QPushButton#saveBtn {{
+                background-color: rgba({ar},{ag},{ab}, 230);
+                border: none;
+                border-radius: 7px;
+                color: black;
+                padding: 9px;
+                font-size: 10px;
+                font-weight: 800;
+                letter-spacing: 1.5px;
+            }}
+            QPushButton#saveBtn:hover {{
+                background-color: rgba({ar},{ag},{ab}, 255);
+            }}
+        """)
+
+        shadow = QGraphicsDropShadowEffect()
+        shadow.setBlurRadius(35); shadow.setColor(QColor(0, 0, 0, 200))
+        shadow.setOffset(0, 6)
+        self.setGraphicsEffect(shadow)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setSpacing(10)
+
+        title = QLabel("PROFILE"); title.setObjectName("title")
+        layout.addWidget(title)
+        layout.addSpacing(4)
+
+        layout.addWidget(self._section_label("GITHUB"))
+        self.gh_input = QLineEdit(); self.gh_input.setPlaceholderText("username")
+        layout.addWidget(self._with_prefix("github.com/", self.gh_input))
+
+        layout.addWidget(self._section_label("LINKEDIN"))
+        self.li_input = QLineEdit(); self.li_input.setPlaceholderText("username")
+        layout.addWidget(self._with_prefix("linkedin.com/in/", self.li_input))
+
+        layout.addWidget(self._section_label("RESUME"))
+        self.file_btn = QPushButton("Upload PDF / DOCX")
+        self.file_btn.setObjectName("fileBtn")
+        self.file_btn.clicked.connect(self._pick_resume)
+        layout.addWidget(self.file_btn)
+
+        layout.addSpacing(2)
+        self.save_btn = QPushButton("SAVE")
+        self.save_btn.setObjectName("saveBtn")
+        self.save_btn.clicked.connect(self._save)
+        layout.addWidget(self.save_btn)
+
+    def _section_label(self, text):
+        lbl = QLabel(text); lbl.setObjectName("sectionLabel")
+        return lbl
+
+    def _with_prefix(self, prefix, line_edit):
+        frame = QFrame(); frame.setObjectName("prefixGroup")
+        h = QHBoxLayout(frame); h.setContentsMargins(0, 0, 4, 0); h.setSpacing(0)
+        p = QLabel(prefix); p.setObjectName("prefix")
+        h.addWidget(p); h.addWidget(line_edit, 1)
+        return frame
+
+    def _pick_resume(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select your resume", "",
+            "Documents (*.pdf *.doc *.docx);;All files (*)")
+        if path:
+            self.data["resume_path"] = path
+            name = os.path.basename(path)
+            if len(name) > 26:
+                name = name[:23] + "..."
+            self.file_btn.setText(f"✓  {name}")
+
+    def _save(self):
+        self.data["github"] = self.gh_input.text().strip()
+        self.data["linkedin"] = self.li_input.text().strip()
+        original = self.save_btn.text()
+        self.save_btn.setText("SAVED")
+        QTimer.singleShot(1200, lambda: self.save_btn.setText(original))
+
+    def get_data(self):
+        return dict(self.data)
 
 
 # ============ MAIN WINDOW ============
@@ -718,116 +730,129 @@ class MainWindow(QMainWindow):
         self.mode = "neutral"
         self.mesh_enabled = True
 
-        # Central video widget
         self.video = VideoWidget()
-        self.video.clicked.connect(self.cycle_face)
+        self.video.clicked.connect(self.analyzer.cycle_face)
         self.setCentralWidget(self.video)
 
-        # Floating overlays (children of video widget so they overlay it)
+        # Overlays parented to video
+        self.emotion_pill = GlassPill("", QColor(180, 180, 180))
+        self.emotion_pill.setParent(self.video); self.emotion_pill.hide()
+
         self.mode_badge = ModeBadge()
         self.mode_badge.setParent(self.video)
-        self.mode_badge.move(24, 24)
-
-        self.emotion_pill = GlassPill("", QColor(180, 180, 180))
-        self.emotion_pill.setParent(self.video)
-        self.emotion_pill.hide()
 
         self.caption_pill = GlassPill(MODE_CAPTIONS["neutral"], MODE_COLORS["neutral"])
         self.caption_pill.setParent(self.video)
 
         self.progress_ring = ProgressRing()
         self.progress_ring.setParent(self.video)
-        
-        self.flash = TransitionFlash(self.video)
+
+        self.profile_panel = ProfilePanel(self.video)
 
         self.hint = QLabel("click: cycle face   ·   space: capture   ·   m: toggle mesh   ·   esc: quit")
         self.hint.setParent(self.video)
         self.hint.setStyleSheet("color: rgba(160,160,170,180); background: transparent;")
-        font = QFont("Segoe UI", 9)
-        self.hint.setFont(font)
+        self.hint.setFont(QFont("Segoe UI", 9))
         self.hint.adjustSize()
 
-        # Render loop
+        self.flash = TransitionFlash(self.video)
+
         self.timer = QTimer()
         self.timer.timeout.connect(self.tick)
-        self.timer.start(16)  # ~60fps target
+        self.timer.start(16)
 
         self.showFullScreen()
 
     def keyPressEvent(self, e):
-        if e.key() == Qt.Key.Key_Escape or e.key() == Qt.Key.Key_Q:
+        # Esc and Q always quit, regardless of focus
+        if e.key() in (Qt.Key.Key_Escape):
             self.close()
+            return
+
+        # Other shortcuts skip when typing
+        focused = QApplication.focusWidget()
+        if isinstance(focused, QLineEdit):
+            super().keyPressEvent(e)
+            return
+
+        if e.key() == Qt.Key.Key_Space:
+            self.analyzer.capture()
         elif e.key() == Qt.Key.Key_M:
             self.mesh_enabled = not self.mesh_enabled
-        elif e.key() == Qt.Key.Key_Space:
-            self.analyzer.capture()
-            # Brief flash animation could go here
         super().keyPressEvent(e)
-
-    def cycle_face(self):
-        self.analyzer.cycle_face()
 
     def resizeEvent(self, e):
         super().resizeEvent(e)
-        self._reposition_overlays()
+        self._reposition()
 
-    def _reposition_overlays(self):
+    def _reposition(self):
         w, h = self.video.width(), self.video.height()
-        self.mode_badge.move(24, 24)
+        margin = 24
 
+        # Top-left: emotion pill
         self.emotion_pill.adjustSize()
-        ew = self.emotion_pill.width()
-        self.emotion_pill.move(w - ew - 24, 24)
+        self.emotion_pill.move(margin, margin)
 
+        # Top-right: mode badge
+        self.mode_badge.adjustSize()
+        self.mode_badge.move(w - self.mode_badge.width() - margin, margin)
+
+        # Bottom-center: caption
         self.caption_pill.adjustSize()
-        cw = self.caption_pill.width()
-        self.caption_pill.move((w - cw) // 2, h - self.caption_pill.height() - 32)
+        self.caption_pill.move((w - self.caption_pill.width()) // 2,
+                               h - self.caption_pill.height() - margin - 8)
 
-        self.progress_ring.move(24, h - self.progress_ring.height() - 28)
+        # Bottom-right: profile panel (always visible)
+        self.profile_panel.move(w - self.profile_panel.width() - margin,
+                                h - self.profile_panel.height() - margin)
 
+        # Above profile panel: progress ring
+        self.progress_ring.move(
+            w - self.progress_ring.width() - margin,
+            h - self.profile_panel.height() - self.progress_ring.height() - margin - 8)
+
+        # Bottom-left: hint
         self.hint.adjustSize()
-        self.hint.move(w - self.hint.width() - 24, h - self.hint.height() - 16)
+        self.hint.move(margin, h - self.hint.height() - 16)
 
     def tick(self):
-            ok, frame = self.cap.read()
-            if not ok:
-                return
-            frame = cv2.flip(frame, 1)
+        ok, frame = self.cap.read()
+        if not ok:
+            return
+        frame = cv2.flip(frame, 1)
 
-            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            target = self.gestures.detect(rgb)
-            new_mode = self.gestures.update_mode(self.mode, target)
-            if new_mode != self.mode:
-                self.mode = new_mode
-                self.analyzer.set_mode(self.mode)
-                self.mode_badge.set_mode(self.mode, MODE_COLORS[self.mode])
-                self.caption_pill.set_text(MODE_CAPTIONS[self.mode])
-                self.caption_pill.set_color(MODE_COLORS[self.mode])
-                self.flash.trigger(self.mode, MODE_COLORS[self.mode])
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        target = self.gestures.detect(rgb)
+        new_mode = self.gestures.update_mode(self.mode, target)
+        if new_mode != self.mode:
+            self.mode = new_mode
+            self.analyzer.set_mode(self.mode)
+            self.mode_badge.set_mode(self.mode, MODE_COLORS[self.mode])
+            self.caption_pill.set_text(MODE_CAPTIONS[self.mode])
+            self.caption_pill.set_color(MODE_COLORS[self.mode])
+            self.flash.trigger(self.mode, MODE_COLORS[self.mode])
 
-            h, w = frame.shape[:2]
-            landmarks_pts, landmarks_raw, metrics = self._analyze_face(frame, w, h)
+        h, w = frame.shape[:2]
+        pts, raw, metrics = self._analyze(frame, w, h)
 
-            pts_to_send = landmarks_pts if self.mesh_enabled else None
-            raw_to_send = landmarks_raw if self.mesh_enabled else None
-            metrics_to_send = metrics if self.mesh_enabled else None
-            self.video.update_frame(frame, pts_to_send, raw_to_send, metrics_to_send, self.mode)
+        send_pts = pts if self.mesh_enabled else None
+        send_raw = raw if self.mesh_enabled else None
+        send_metrics = metrics if self.mesh_enabled else None
+        self.video.update_frame(frame, send_pts, send_raw, send_metrics, self.mode)
 
-            state = self.analyzer.get_state()
-            emo = state["emotion"]
-            if emo and emo != "neutral":
-                self.emotion_pill.set_text(emo.upper())
-                self.emotion_pill.show()
-            else:
-                self.emotion_pill.hide()
+        emo = self.analyzer.get_state()["emotion"]
+        if emo and emo != "neutral":
+            self.emotion_pill.set_text(emo.upper())
+            self.emotion_pill.show()
+        else:
+            self.emotion_pill.hide()
 
-            progress, streak_target = self.gestures.progress()
-            self.progress_ring.set_state(progress, streak_target)
+        progress, streak_target = self.gestures.progress()
+        self.progress_ring.set_state(progress, streak_target)
 
-            self._reposition_overlays()
-            
-        
-    def _analyze_face(self, frame, w, h):
+        self._reposition()
+
+    def _analyze(self, frame, w, h):
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
         ts_ms = int((time.time() - self.analyzer.start) * 1000)
@@ -841,21 +866,21 @@ class MainWindow(QMainWindow):
         from cvModule import order_faces, compute_metrics, emotion_from_blendshapes
         ordered = order_faces(faces, w, h)
         self.analyzer.locked_idx %= len(ordered)
-        real_locked = ordered[self.analyzer.locked_idx]
-        locked_lm = faces[real_locked]
+        real = ordered[self.analyzer.locked_idx]
+        lm = faces[real]
 
         self.analyzer.last_clean_frame = frame.copy()
-        self.analyzer.last_locked_landmarks = locked_lm
+        self.analyzer.last_locked_landmarks = lm
 
-        metrics, pts = compute_metrics(locked_lm, w, h)
+        metrics, pts = compute_metrics(lm, w, h)
         emotion = ("neutral", 0.0)
-        if result.face_blendshapes and real_locked < len(result.face_blendshapes):
-            emotion = emotion_from_blendshapes(result.face_blendshapes[real_locked])
+        if result.face_blendshapes and real < len(result.face_blendshapes):
+            emotion = emotion_from_blendshapes(result.face_blendshapes[real])
         self.analyzer.smoother.add(metrics, emotion)
         if time.time() - self.analyzer.smoother.last_update >= 2.0:
             self.analyzer.smoother.commit()
 
-        return pts, locked_lm, metrics
+        return pts, lm, metrics
 
     def closeEvent(self, e):
         self.timer.stop()
