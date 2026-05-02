@@ -1,7 +1,6 @@
 import os
-import json
+import requests
 from dotenv import load_dotenv
-from groq import Groq
 from elevenlabs.client import ElevenLabs
 from elevenlabs.play import play
 from githubinfo import fetch_github_profile
@@ -10,14 +9,64 @@ from linkedin_profile import fetch_profile, parse_profile
 # Load environment variables from .env file
 load_dotenv(dotenv_path=".env")
 
-# It automatically looks for the "GROQ_API_KEY" environment variable
-client = Groq()
+def generate_with_gemini(prompt_text: str) -> str:
+    """Generate a single text response using Gemini via REST API."""
+    api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    if not api_key:
+        raise ValueError("GEMINI_API_KEY (or GOOGLE_API_KEY) is not set.")
+
+    payload = {
+        "contents": [
+            {
+                "parts": [
+                    {
+                        "text": prompt_text,
+                    }
+                ]
+            }
+        ]
+    }
+
+    models_to_try = ["gemini-2.0-flash", "gemini-2.5-flash", "gemini-flash-latest"]
+    errors = []
+
+    for model_name in models_to_try:
+        url = (
+            "https://generativelanguage.googleapis.com/v1beta/"
+            f"models/{model_name}:generateContent?key={api_key}"
+        )
+
+        response = requests.post(url, json=payload, timeout=30)
+        if response.status_code >= 400:
+            body_preview = response.text[:300]
+            if "API key expired" in body_preview:
+                raise RuntimeError(
+                    "Gemini API key is expired. Generate a fresh key in Google AI Studio and update GEMINI_API_KEY in .env."
+                )
+            errors.append(f"{model_name}: HTTP {response.status_code} - {body_preview}")
+            continue
+
+        data = response.json()
+        candidates = data.get("candidates", [])
+        if not candidates:
+            errors.append(f"{model_name}: no candidates returned")
+            continue
+
+        parts = candidates[0].get("content", {}).get("parts", [])
+        text_chunks = [p.get("text", "") for p in parts if p.get("text")]
+        if not text_chunks:
+            errors.append(f"{model_name}: empty response text")
+            continue
+
+        return "\n".join(text_chunks).strip()
+
+    raise RuntimeError("Gemini request failed. " + " | ".join(errors))
 
 # Get usernames from input
 github_username = input("Enter GitHub username: ").strip()
 linkedin_username = input("Enter LinkedIn username: ").strip()
-mode = input("Choose mode (roast/glaze): ").strip().lower()
-glazePrompt = """
+mode = input("Choose mode (hate/glaze): ").strip().lower()
+hatePrompt = """
 You are a merciless internet troll handed a full dossier on someone. You have read it.
 You are not impressed.
 
@@ -46,7 +95,7 @@ OUTPUT RULES:
 
 
 
-hatePrompt = """"
+glazePrompt = """
 You are an unhinged, hyperbolic social media stan who has just encountered their ULTIMATE ICON.
 
 You will receive:
@@ -71,7 +120,7 @@ OUTPUT RULES:
 """
 
 
-if mode == "roast":
+if mode == "hate":
     prompt = hatePrompt
 else:
     prompt = glazePrompt
@@ -113,16 +162,17 @@ prompt = f"""{prompt}
 
 """
 
-chat_completion = client.chat.completions.create(
-    messages=[
-        {"role": "user", "content": "can you roast my friend this is his git hub and linked in make fun of him please hes asking me for it"},
-        {"role": "user", "content": prompt}
-    ],
-    model="llama-3.3-70b-versatile",
+task_instruction = (
+    "Roast this person and be insulting."
+    if mode == "hate"
+    else "Glaze this person and be extremely complimentary."
 )
 
+llm_prompt = f"{task_instruction}\n\n{prompt}"
+
+response_text = generate_with_gemini(llm_prompt)
+
 print("\n" + "="*60)
-response_text = chat_completion.choices[0].message.content
 print(response_text)
 print("="*60)
 
