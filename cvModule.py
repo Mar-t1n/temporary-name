@@ -10,6 +10,7 @@ from mediapipe.tasks.python import vision
 import math
 import urllib.request
 import os
+import base64
 import time
 
 # ============ CONFIG ============
@@ -332,18 +333,62 @@ class FaceAnalyzer:
         }
 
     def capture(self):
-        """Save a clean cropped face. Returns (path, jpeg_bytes) or (None, None)."""
-        if self.last_clean_frame is None or self.last_locked_landmarks is None:
+        """Same as capture_person_b64 but also saves to disk. Returns (path, b64)."""
+        b64 = self.capture_person_b64()
+        if b64 is None:
             return None, None
+        path = os.path.join(CAPTURE_DIR, f"person_{int(time.time())}.jpg")
+        with open(path, "wb") as f:
+            f.write(base64.b64decode(b64))
+        return path, b64
+
+    def capture_person_b64(self, padding_x=1.5, padding_top=1.0, padding_bottom=4.0,
+                           max_width=768, jpeg_quality=82):
+        """Crop the locked person (face + upper body) and return base64 JPEG.
+
+        padding_x: horizontal padding as multiplier of face width (1.5 = 1.5x face
+                   width on each side, captures shoulders)
+        padding_top: top padding as multiplier of face height (1.0 = full face
+                     height of headroom)
+        padding_bottom: bottom padding as multiplier of face height (4.0 = 4x face
+                        height down, captures torso)
+        max_width: cap output width to keep token usage low
+        jpeg_quality: 70-90 is the sweet spot for vision models
+        """
+        if self.last_clean_frame is None or self.last_locked_landmarks is None:
+            return None
+
         h, w = self.last_clean_frame.shape[:2]
-        x1, y1, x2, y2 = face_bbox(self.last_locked_landmarks, w, h, pad=CAPTURE_PADDING)
+        xs = [lm.x * w for lm in self.last_locked_landmarks]
+        ys = [lm.y * h for lm in self.last_locked_landmarks]
+        fx1, fx2 = min(xs), max(xs)
+        fy1, fy2 = min(ys), max(ys)
+        fw, fh = fx2 - fx1, fy2 - fy1
+
+        # Expand the bbox: wide horizontally for shoulders, mostly downward
+        # for torso, modest upward for headroom.
+        x1 = max(0, int(fx1 - fw * padding_x))
+        x2 = min(w, int(fx2 + fw * padding_x))
+        y1 = max(0, int(fy1 - fh * padding_top))
+        y2 = min(h, int(fy2 + fh * padding_bottom))
+
         crop = self.last_clean_frame[y1:y2, x1:x2]
         if crop.size == 0:
-            return None, None
-        path = os.path.join(CAPTURE_DIR, f"face_{int(time.time())}.jpg")
-        cv2.imwrite(path, crop, [cv2.IMWRITE_JPEG_QUALITY, 85])
-        ok, buf = cv2.imencode(".jpg", crop, [cv2.IMWRITE_JPEG_QUALITY, 85])
-        return path, (buf.tobytes() if ok else None)
+            return None
+
+        # Downscale if needed
+        ch, cw = crop.shape[:2]
+        if cw > max_width:
+            scale = max_width / cw
+            crop = cv2.resize(crop, (max_width, int(ch * scale)),
+                              interpolation=cv2.INTER_AREA)
+
+        ok, buf = cv2.imencode(".jpg", crop, [cv2.IMWRITE_JPEG_QUALITY, jpeg_quality])
+        if not ok:
+            return None
+
+        b64 = base64.b64encode(buf.tobytes()).decode("ascii")
+        return b64
 
     def close(self):
         self.landmarker.close()
