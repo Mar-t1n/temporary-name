@@ -1,0 +1,517 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>FaceJudge</title>
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      :root {
+        --bg: #0a0a0f;
+        --panel: rgba(20, 20, 30, 0.7);
+        --border: rgba(255, 255, 255, 0.08);
+        --text: #f0f0f5;
+        --muted: #888;
+        --neutral: #00ffdc;
+        --glaze: #ff70c4;
+        --hate: #ff4040;
+      }
+      body {
+        background: var(--bg);
+        color: var(--text);
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        overflow: hidden;
+        height: 100vh;
+      }
+      /* Animated background */
+      body::before {
+        content: "";
+        position: fixed;
+        inset: 0;
+        background:
+          radial-gradient(
+            circle at 20% 30%,
+            rgba(0, 255, 220, 0.08),
+            transparent 40%
+          ),
+          radial-gradient(
+            circle at 80% 70%,
+            rgba(255, 112, 196, 0.06),
+            transparent 40%
+          );
+        z-index: -1;
+        animation: pulse 8s ease-in-out infinite;
+      }
+      @keyframes pulse {
+        0%,
+        100% {
+          opacity: 0.6;
+        }
+        50% {
+          opacity: 1;
+        }
+      }
+
+      .app {
+        display: grid;
+        grid-template-columns: 360px 1fr;
+        height: 100vh;
+        gap: 16px;
+        padding: 16px;
+      }
+
+      /* Sidebar */
+      .sidebar {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 16px;
+        padding: 24px;
+        backdrop-filter: blur(20px);
+        display: flex;
+        flex-direction: column;
+        gap: 20px;
+        overflow-y: auto;
+      }
+      .logo {
+        font-size: 28px;
+        font-weight: 800;
+        letter-spacing: -1px;
+        background: linear-gradient(135deg, var(--neutral), var(--glaze));
+        -webkit-background-clip: text;
+        background-clip: text;
+        color: transparent;
+      }
+      .logo span {
+        color: var(--muted);
+        font-weight: 400;
+        font-size: 12px;
+        display: block;
+      }
+
+      .field {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+      .field label {
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 1px;
+        color: var(--muted);
+      }
+      .field input,
+      .field .file-btn {
+        background: rgba(0, 0, 0, 0.4);
+        border: 1px solid var(--border);
+        color: var(--text);
+        padding: 10px 12px;
+        border-radius: 8px;
+        font-size: 14px;
+        font-family: inherit;
+        outline: none;
+        transition: border-color 0.2s;
+      }
+      .field input:focus {
+        border-color: var(--neutral);
+      }
+      .field .prefix {
+        display: flex;
+        align-items: center;
+        background: rgba(0, 0, 0, 0.4);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 0 12px;
+      }
+      .field .prefix span {
+        color: var(--muted);
+        font-size: 13px;
+      }
+      .field .prefix input {
+        border: none;
+        background: transparent;
+        padding: 10px 0 10px 4px;
+        flex: 1;
+      }
+      .file-btn {
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+      }
+      .file-btn:hover {
+        border-color: var(--neutral);
+      }
+      .file-btn .name {
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .file-btn input[type="file"] {
+        display: none;
+      }
+
+      .save-btn {
+        background: linear-gradient(135deg, var(--neutral), #00b8b0);
+        color: #000;
+        border: none;
+        padding: 12px;
+        border-radius: 8px;
+        font-weight: 700;
+        cursor: pointer;
+        font-size: 14px;
+        text-transform: uppercase;
+        letter-spacing: 1px;
+        transition: transform 0.1s;
+      }
+      .save-btn:hover {
+        transform: translateY(-1px);
+      }
+
+      /* Main area */
+      .main {
+        position: relative;
+        border-radius: 16px;
+        overflow: hidden;
+        background: #000;
+        border: 1px solid var(--border);
+      }
+      .video-wrap {
+        width: 100%;
+        height: 100%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+      }
+      .video-wrap img {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+      }
+
+      /* Mode pills */
+      .modes {
+        position: absolute;
+        top: 24px;
+        left: 50%;
+        transform: translateX(-50%);
+        display: flex;
+        gap: 8px;
+        background: rgba(0, 0, 0, 0.5);
+        padding: 6px;
+        border-radius: 999px;
+        border: 1px solid var(--border);
+        backdrop-filter: blur(20px);
+      }
+      .mode-btn {
+        background: transparent;
+        border: none;
+        color: var(--muted);
+        padding: 10px 22px;
+        border-radius: 999px;
+        cursor: pointer;
+        font-weight: 600;
+        font-size: 13px;
+        text-transform: uppercase;
+        letter-spacing: 1px;
+        transition: all 0.2s;
+      }
+      .mode-btn.active[data-mode="neutral"] {
+        background: var(--neutral);
+        color: #000;
+      }
+      .mode-btn.active[data-mode="glaze"] {
+        background: var(--glaze);
+        color: #000;
+      }
+      .mode-btn.active[data-mode="hate"] {
+        background: var(--hate);
+        color: #fff;
+      }
+
+      /* Caption box */
+      .caption {
+        position: absolute;
+        bottom: 24px;
+        left: 50%;
+        transform: translateX(-50%);
+        max-width: 80%;
+        min-width: 320px;
+        background: rgba(0, 0, 0, 0.7);
+        border: 1px solid var(--border);
+        backdrop-filter: blur(20px);
+        border-radius: 16px;
+        padding: 16px 24px;
+        text-align: center;
+        font-size: 18px;
+        line-height: 1.4;
+        transition: all 0.3s;
+      }
+      .caption.glaze {
+        border-color: var(--glaze);
+        box-shadow: 0 0 40px rgba(255, 112, 196, 0.3);
+      }
+      .caption.hate {
+        border-color: var(--hate);
+        box-shadow: 0 0 40px rgba(255, 64, 64, 0.3);
+      }
+      .caption .label {
+        font-size: 10px;
+        text-transform: uppercase;
+        letter-spacing: 2px;
+        color: var(--muted);
+        margin-bottom: 6px;
+      }
+
+      /* Stats overlay */
+      .stats {
+        position: absolute;
+        top: 24px;
+        right: 24px;
+        background: rgba(0, 0, 0, 0.6);
+        border: 1px solid var(--border);
+        backdrop-filter: blur(20px);
+        border-radius: 12px;
+        padding: 16px;
+        font-size: 12px;
+        min-width: 200px;
+      }
+      .stats .row {
+        display: flex;
+        justify-content: space-between;
+        padding: 4px 0;
+        color: var(--muted);
+      }
+      .stats .row b {
+        color: var(--text);
+        font-weight: 600;
+      }
+      .stats h4 {
+        font-size: 10px;
+        text-transform: uppercase;
+        letter-spacing: 1.5px;
+        color: var(--neutral);
+        margin-bottom: 8px;
+      }
+      .emotion-pill {
+        display: inline-block;
+        padding: 2px 10px;
+        border-radius: 999px;
+        background: rgba(0, 255, 220, 0.15);
+        color: var(--neutral);
+        font-weight: 700;
+        text-transform: uppercase;
+        font-size: 11px;
+      }
+
+      /* Hint */
+      .hint {
+        position: absolute;
+        bottom: 24px;
+        right: 24px;
+        color: var(--muted);
+        font-size: 11px;
+        background: rgba(0, 0, 0, 0.5);
+        padding: 6px 12px;
+        border-radius: 6px;
+        border: 1px solid var(--border);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="app">
+      <!-- Sidebar -->
+      <aside class="sidebar">
+        <div class="logo">
+          FaceJudge
+          <span>Glaze or hate. Powered by your face.</span>
+        </div>
+
+        <div class="field">
+          <label>GitHub</label>
+          <div class="prefix">
+            <span>github.com/</span>
+            <input id="github" placeholder="username" />
+          </div>
+        </div>
+
+        <div class="field">
+          <label>LinkedIn</label>
+          <div class="prefix">
+            <span>linkedin.com/in/</span>
+            <input id="linkedin" placeholder="username" />
+          </div>
+        </div>
+
+        <div class="field">
+          <label>Resume</label>
+          <label class="file-btn">
+            <span>Upload PDF</span>
+            <span class="name" id="resumeName">No file</span>
+            <input type="file" id="resume" accept=".pdf,.doc,.docx" />
+          </label>
+        </div>
+
+        <button class="save-btn" id="saveBtn">Save Profile</button>
+
+        <div style="flex: 1"></div>
+        <div style="font-size: 11px; color: var(--muted); line-height: 1.5">
+          Click video to cycle faces · Press capture to snapshot · Mode pill
+          switches roast tone
+        </div>
+      </aside>
+
+      <!-- Main video area -->
+      <main class="main">
+        <div class="video-wrap" id="videoWrap">
+          <img src="/video_feed" alt="camera feed" />
+        </div>
+
+        <!-- Mode toggle -->
+        <div class="modes">
+          <button class="mode-btn active" data-mode="neutral">Neutral</button>
+          <button class="mode-btn" data-mode="glaze">Glaze</button>
+          <button class="mode-btn" data-mode="hate">Hate</button>
+        </div>
+
+        <!-- Stats panel -->
+        <div class="stats" id="stats">
+          <h4>Live Analysis</h4>
+          <div class="row">
+            <span>Emotion</span
+            ><span class="emotion-pill" id="emotion">neutral</span>
+          </div>
+          <div class="row"><span>Symmetry</span><b id="symmetry">—</b></div>
+          <div class="row"><span>fWHR</span><b id="fwhr">—</b></div>
+          <div class="row"><span>Lip Ratio</span><b id="lipRatio">—</b></div>
+          <div class="row">
+            <span>Eye Spacing</span><b id="eyeSpacing">—</b>
+          </div>
+          <div class="row"><span>Jaw Ratio</span><b id="jawRatio">—</b></div>
+          <div class="row"><span>Thirds</span><b id="thirds">—</b></div>
+        </div>
+
+        <!-- Caption -->
+        <div class="caption" id="caption">
+          <div class="label">Pick a mode to begin</div>
+          <div id="captionText">
+            Stand in frame and click a button above. We'll do the rest.
+          </div>
+        </div>
+
+        <!-- Hint -->
+        <div class="hint">Click feed to cycle · SPACE to capture</div>
+      </main>
+    </div>
+
+    <script>
+      // Mode handling
+      const modeBtns = document.querySelectorAll(".mode-btn");
+      const caption = document.getElementById("caption");
+      const captionText = document.getElementById("captionText");
+      let currentMode = "neutral";
+
+      const captionsByMode = {
+        neutral: {
+          label: "Standby",
+          text: "Stand in frame and click a button above. We'll do the rest.",
+        },
+        glaze: { label: "Glaze mode", text: "Loading compliments..." },
+        hate: { label: "Hate mode", text: "Sharpening knives..." },
+      };
+
+      function updateCaption(mode, text) {
+        caption.classList.remove("glaze", "hate");
+        if (mode !== "neutral") caption.classList.add(mode);
+        caption.querySelector(".label").textContent =
+          captionsByMode[mode].label;
+        captionText.textContent = text || captionsByMode[mode].text;
+      }
+
+      modeBtns.forEach((btn) => {
+        btn.addEventListener("click", async () => {
+          modeBtns.forEach((b) => b.classList.remove("active"));
+          btn.classList.add("active");
+          currentMode = btn.dataset.mode;
+          updateCaption(currentMode);
+          await fetch("/mode", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ mode: currentMode }),
+          });
+        });
+      });
+
+      // Click video to cycle faces
+      document
+        .getElementById("videoWrap")
+        .addEventListener("click", async () => {
+          await fetch("/cycle", { method: "POST" });
+        });
+
+      // Resume upload
+      const resumeInput = document.getElementById("resume");
+      const resumeName = document.getElementById("resumeName");
+      resumeInput.addEventListener("change", () => {
+        resumeName.textContent = resumeInput.files[0]?.name || "No file";
+      });
+
+      // Save profile
+      document.getElementById("saveBtn").addEventListener("click", async () => {
+        const fd = new FormData();
+        fd.append("github", document.getElementById("github").value);
+        fd.append("linkedin", document.getElementById("linkedin").value);
+        if (resumeInput.files[0]) fd.append("resume", resumeInput.files[0]);
+        const res = await fetch("/profile", { method: "POST", body: fd });
+        const data = await res.json();
+        if (data.ok) {
+          const btn = document.getElementById("saveBtn");
+          btn.textContent = "Saved ✓";
+          setTimeout(() => {
+            btn.textContent = "Save Profile";
+          }, 1500);
+        }
+      });
+
+      // Capture on spacebar
+      document.addEventListener("keydown", async (e) => {
+        if (e.code === "Space" && document.activeElement.tagName !== "INPUT") {
+          e.preventDefault();
+          await fetch("/capture", { method: "POST" });
+          const cap = document.getElementById("caption");
+          cap.style.transform = "translateX(-50%) scale(1.05)";
+          setTimeout(() => {
+            cap.style.transform = "translateX(-50%) scale(1)";
+          }, 200);
+        }
+      });
+
+      // Poll state every 500ms
+      async function pollState() {
+        try {
+          const res = await fetch("/state");
+          const s = await res.json();
+          const m = s.metrics || {};
+          document.getElementById("emotion").textContent =
+            s.emotion || "neutral";
+          document.getElementById("symmetry").textContent = m.symmetry
+            ? `${m.symmetry}%`
+            : "—";
+          document.getElementById("fwhr").textContent = m.fwhr ?? "—";
+          document.getElementById("lipRatio").textContent = m.lip_ratio ?? "—";
+          document.getElementById("eyeSpacing").textContent =
+            m.eye_spacing ?? "—";
+          document.getElementById("jawRatio").textContent = m.jaw_ratio ?? "—";
+          const t = m.facial_thirds;
+          document.getElementById("thirds").textContent = t
+            ? `${t[0]}/${t[1]}/${t[2]}`
+            : "—";
+        } catch (e) {}
+      }
+      setInterval(pollState, 500);
+      pollState();
+    </script>
+  </body>
+</html>
