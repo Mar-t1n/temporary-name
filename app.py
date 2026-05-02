@@ -9,6 +9,7 @@ import os
 import time
 import math
 import urllib.request
+from collections import deque
 
 import cv2
 import numpy as np
@@ -30,22 +31,28 @@ from cvModule import FaceAnalyzer, ALL_CONNECTIONS
 GESTURE_MODEL_URL = "https://storage.googleapis.com/mediapipe-models/gesture_recognizer/gesture_recognizer/float16/1/gesture_recognizer.task"
 GESTURE_MODEL_PATH = "gesture_recognizer.task"
 
-GESTURE_HOLD_FRAMES = 8       # how many recent frames must agree
-GESTURE_WINDOW = 12           # size of the rolling vote window
+GESTURE_HOLD_FRAMES = 8
+GESTURE_WINDOW = 12
 GESTURE_COOLDOWN = 1.2
-MISS_TOLERANCE = 10           # forgive up to ~third of a second of detection gaps
+MISS_TOLERANCE = 10
+MIN_HAND_CONFIDENCE = 0.55
+
+FACE_PRESENCE_WINDOW = 8     # how many recent frames to track for face presence
+FACE_LOSS_GRACE = 6          # frames of "no face" before we actually drop the mesh
 
 MODE_COLORS = {
-    "neutral": QColor(160, 160, 170),
-    "glaze":   QColor(60, 220, 130),
-    "hate":    QColor(255, 70, 70),
+    "neutral":     QColor(160, 160, 170),
+    "glaze":       QColor(60, 220, 130),
+    "hate":        QColor(255, 70, 70),
+    "super_hate":  QColor(180, 70, 255),  # purple
 }
-ACCENT = QColor(120, 200, 255)  # UI accent independent of mode
+ACCENT = QColor(120, 200, 255)
 
 MODE_CAPTIONS = {
-    "neutral": "Hold thumb sideways, up to glaze, down to hate",
-    "glaze":   "Glazing in progress...",
-    "hate":    "Roasting in progress...",
+    "neutral":    "Hold thumb sideways, up to glaze, down to hate",
+    "glaze":      "Glazing in progress...",
+    "hate":       "Roasting in progress...",
+    "super_hate": "MAXIMUM ROAST ENGAGED",
 }
 
 if not os.path.exists(GESTURE_MODEL_PATH):
@@ -55,15 +62,7 @@ if not os.path.exists(GESTURE_MODEL_PATH):
 
 # ============ GESTURE CLASSIFIER ============
 def classify_thumb_gesture(landmarks):
-    """Return 'up' / 'down' / 'side' / None.
-
-    Looser, more forgiving than before:
-      - Curl check counts a finger as curled if its tip is anywhere near
-        or past the PIP joint (1.15x slack instead of 1.05x).
-      - Only 2 of 4 fingers must be curled (the other two can be lazy).
-      - Thumb only needs to be moderately extended.
-      - Direction zones are wide and overlap-free.
-    """
+    """Return 'up' / 'down' / 'side' / None."""
     if not landmarks:
         return None
 
@@ -71,40 +70,25 @@ def classify_thumb_gesture(landmarks):
         return math.hypot(landmarks[a].x - landmarks[b].x,
                           landmarks[a].y - landmarks[b].y)
 
-    palm = d(0, 9)  # wrist to middle-finger MCP
+    palm = d(0, 9)
     if palm < 0.04:
         return None
-
-    # Thumb must be at least somewhat extended away from its base
     if d(2, 4) < palm * 0.35:
         return None
 
-    # Count curled fingers — tip is curled if it's not significantly
-    # farther from wrist than the PIP joint.
     curled = sum(1 for pip, tip in [(6, 8), (10, 12), (14, 16), (18, 20)]
                  if d(0, tip) < d(0, pip) * 1.15)
-
-    # Need at least 2 curled to count as a thumb gesture (was 3).
     if curled < 2:
         return None
 
-    # Direction: vector from thumb base (CMC, idx 1) to tip (idx 4)
-    # Using CMC instead of MCP gives a longer baseline = more stable angle.
     dx = landmarks[4].x - landmarks[1].x
     dy = landmarks[4].y - landmarks[1].y
-
-    # Use angle in degrees so the zones are intuitive.
-    # 0° = pointing right, -90° = up, 90° = down, ±180° = left
     angle = math.degrees(math.atan2(dy, dx))
 
-    # Sideways: anything pointing roughly horizontal (mirrored ok)
-    # — within ±35° of horizontal on either side.
     if abs(angle) < 35 or abs(angle) > 145:
         return "side"
-    # Up: between -145° and -35° (anywhere in upper half, excluding sides)
     if -145 < angle < -35:
         return "up"
-    # Down: between 35° and 145°
     if 35 < angle < 145:
         return "down"
     return None
@@ -116,58 +100,71 @@ class GestureDetector:
         opts = vision.GestureRecognizerOptions(
             base_options=base,
             running_mode=vision.RunningMode.VIDEO,
-            num_hands=1,
+            num_hands=2,                              # was 1, now 2 for super_hate
+            min_hand_detection_confidence=MIN_HAND_CONFIDENCE,
+            min_hand_presence_confidence=MIN_HAND_CONFIDENCE,
         )
         self.recognizer = vision.GestureRecognizer.create_from_options(opts)
         self.start = time.time()
-
-        # Rolling window of recent classifications (per-frame raw guesses)
         self.window = []
         self.miss_count = 0
         self.last_switch = 0.0
-
-        # The mode currently being "voted into" via the window
         self.candidate = None
 
     def detect(self, rgb_frame):
+        """Return: 'glaze' / 'hate' / 'super_hate' / 'neutral' / None.
+        Only returns a value when at least one VALID thumb gesture is seen."""
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
         ts_ms = int((time.time() - self.start) * 1000)
         result = self.recognizer.recognize_for_video(mp_image, ts_ms)
-        if not result.hand_landmarks:
+
+        hands = result.hand_landmarks or []
+        if not hands:
             return None
-        orient = classify_thumb_gesture(result.hand_landmarks[0])
-        if orient is None:
+
+        # Classify each detected hand independently
+        orientations = []
+        for hand_lms in hands:
+            o = classify_thumb_gesture(hand_lms)
+            if o is not None:
+                orientations.append(o)
+
+        if not orientations:
             return None
-        return {"up": "glaze", "down": "hate", "side": "neutral"}.get(orient)
+
+        # Two valid thumbs-down at once = super hate
+        if orientations.count("down") >= 2:
+            return "super_hate"
+
+        # Otherwise prefer the strongest single signal
+        # (any down beats up beats side, since they're more deliberate)
+        if "down" in orientations:
+            return "hate"
+        if "up" in orientations:
+            return "glaze"
+        if "side" in orientations:
+            return "neutral"
+        return None
 
     def update_mode(self, current_mode, target):
-        """Vote-based mode switching with miss tolerance."""
         now = time.time()
-
         if target is None:
-            # No detection this frame - tolerate up to MISS_TOLERANCE
             self.miss_count += 1
             if self.miss_count > MISS_TOLERANCE:
                 self.window.clear()
                 self.candidate = None
             return current_mode
-
         self.miss_count = 0
         self.window.append(target)
         if len(self.window) > GESTURE_WINDOW:
             self.window.pop(0)
 
-        # Already on this mode and inside cooldown? freeze the vote.
         if target == current_mode and now - self.last_switch < GESTURE_COOLDOWN:
             return current_mode
 
-        # Need at least HOLD_FRAMES of the same target in the recent window
-        # for a switch to commit.
-        counts = {"glaze": 0, "hate": 0, "neutral": 0}
-        for v in self.window:
-            counts[v] = counts.get(v, 0) + 1
+        counts = {m: self.window.count(m) for m in MODE_COLORS}
+        winner = max(counts, key=lambda m: counts[m])
 
-        winner = max(counts, key=lambda k: counts[k])
         if (counts[winner] >= GESTURE_HOLD_FRAMES
                 and winner != current_mode
                 and now - self.last_switch >= GESTURE_COOLDOWN):
@@ -176,24 +173,17 @@ class GestureDetector:
             self.candidate = None
             return winner
 
-        # Track candidate for progress ring
-        self.candidate = winner if counts[winner] > 0 else None
-    
-        # Track candidate for progress ring (but not the one we're already on)
         if winner != current_mode and counts[winner] > 0:
             self.candidate = winner
         else:
             self.candidate = None
         return current_mode
 
-
     def progress(self):
         if not self.candidate:
             return 0.0, None
-        counts = {"glaze": 0, "hate": 0, "neutral": 0}
-        for v in self.window:
-            counts[v] = counts.get(v, 0) + 1
-        return min(1.0, counts[self.candidate] / GESTURE_HOLD_FRAMES), self.candidate
+        count = self.window.count(self.candidate)
+        return min(1.0, count / GESTURE_HOLD_FRAMES), self.candidate
 
     def close(self):
         self.recognizer.close()
@@ -237,7 +227,6 @@ class MeshRenderer:
             z_min, z_max = min(zs), max(zs)
             z_range = max(0.001, z_max - z_min)
 
-        # Ghost trail
         if self.last_pts and len(self.last_pts) == len(pts):
             ghost = QColor(color); ghost.setAlpha(25)
             painter.setPen(QPen(ghost, 0.6))
@@ -245,7 +234,6 @@ class MeshRenderer:
                 painter.drawLine(self.last_pts[a][0], self.last_pts[a][1],
                                  self.last_pts[b][0], self.last_pts[b][1])
 
-        # Depth-shaded wireframe
         for a, b in ALL_CONNECTIONS:
             if zs:
                 t = 1.0 - ((zs[a] + zs[b]) / 2 - z_min) / z_range
@@ -256,14 +244,12 @@ class MeshRenderer:
             painter.setPen(QPen(c, 0.7))
             painter.drawLine(pts[a][0], pts[a][1], pts[b][0], pts[b][1])
 
-        # Cross bracing
         brace = QColor(color); brace.setAlpha(110)
         bp = QPen(brace, 0.9); bp.setStyle(Qt.PenStyle.DashLine); bp.setDashPattern([6, 4])
         painter.setPen(bp)
         for a, b in self.BRACE_LINES:
             painter.drawLine(pts[a][0], pts[a][1], pts[b][0], pts[b][1])
 
-        # Scan line + afterglow
         phase = (self.t % 110) / 110
         scan_y = fy1 + face_h * phase
         for i in range(4):
@@ -277,7 +263,6 @@ class MeshRenderer:
             if min(pts[a][1], pts[b][1]) <= scan_y <= max(pts[a][1], pts[b][1]):
                 painter.drawLine(pts[a][0], pts[a][1], pts[b][0], pts[b][1])
 
-        # Targeting brackets
         breath = math.sin(self.t * 0.05) * 3
         pad = 22 + breath
         bl = max(10, face_w * 0.13)
@@ -290,7 +275,6 @@ class MeshRenderer:
             painter.drawLine(int(x), int(y), int(x + bl * dx), int(y))
             painter.drawLine(int(x), int(y), int(x), int(y + bl * dy))
 
-        # Rotating reticle + crosshair
         r = max(face_w, face_h) / 2 + 32 + breath
         rot = (self.t * 1.4) % 360
         rc = QColor(color); rc.setAlpha(140)
@@ -311,7 +295,6 @@ class MeshRenderer:
                              int(cx + dx + (7 if dx != 0 else 0)),
                              int(cy + dy + (7 if dy != 0 else 0)))
 
-        # Diamond markers
         mc = QColor(color); mc.setAlpha(220)
         painter.setPen(QPen(mc, 1.2))
         painter.setBrush(Qt.BrushStyle.NoBrush)
@@ -322,7 +305,6 @@ class MeshRenderer:
             d.lineTo(x, y + 4); d.lineTo(x - 4, y); d.closeSubpath()
             painter.drawPath(d)
 
-        # Telemetry labels
         font = QFont("Consolas", 9); font.setWeight(QFont.Weight.Bold)
         painter.setFont(font)
         lc = QColor(color); lc.setAlpha(140)
@@ -343,7 +325,6 @@ class MeshRenderer:
             text_x = ex + side * 8 if side > 0 else ex - 8 - tw
             painter.drawText(QPointF(text_x, ey + 3), value)
 
-        # Glitch
         if self.glitch_timer > 0:
             self.glitch_timer -= 1
             off = np.random.randint(-4, 5)
@@ -356,7 +337,6 @@ class MeshRenderer:
         elif np.random.random() < 0.006:
             self.glitch_timer = 5
 
-        # Particles
         if self.t % 7 == 0 and len(self.particles) < 20:
             idx = np.random.choice(self.DATA_ANCHORS)
             angle = np.random.uniform(0, math.tau)
@@ -431,7 +411,9 @@ class ModeBadge(QWidget):
         self.set_mode("neutral", MODE_COLORS["neutral"])
 
     def set_mode(self, mode, color):
-        self.label.setText(mode.upper())
+        # Display name: super_hate -> SUPER HATE
+        display = mode.replace("_", " ").upper()
+        self.label.setText(display)
         c = color
         self.label.setStyleSheet(f"color: rgb({c.red()},{c.green()},{c.blue()}); background: transparent;")
         self.setStyleSheet(f"""
@@ -477,7 +459,7 @@ class GlassPill(QWidget):
 class ProgressRing(QWidget):
     def __init__(self):
         super().__init__()
-        self.setFixedSize(110, 56)
+        self.setFixedSize(140, 56)
         self.progress = 0.0
         self.color = MODE_COLORS["neutral"]
         self.label_text = ""
@@ -487,7 +469,7 @@ class ProgressRing(QWidget):
         self.progress = progress
         if target_mode:
             self.color = MODE_COLORS[target_mode]
-            self.label_text = target_mode.upper()
+            self.label_text = target_mode.replace("_", " ").upper()
         else:
             self.label_text = ""
         self.update()
@@ -510,7 +492,7 @@ class ProgressRing(QWidget):
         font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 1)
         p.setFont(font)
         p.setPen(QPen(self.color))
-        p.drawText(QRectF(cx + r + 8, 0, 80, self.height()),
+        p.drawText(QRectF(cx + r + 8, 0, 110, self.height()),
                    Qt.AlignmentFlag.AlignVCenter, self.label_text)
 
 
@@ -526,12 +508,11 @@ class TransitionFlash(QWidget):
         self._timer.timeout.connect(self._step)
 
     def trigger(self, mode_name, color):
-        self.text = mode_name.upper()
+        self.text = mode_name.replace("_", " ").upper()
         self.color = color
         self.alpha = 1.0
-        parent = self.parent()
-        # parent() may return a generic QObject; ensure it has a QWidget size()
-        if isinstance(parent, QWidget):
+        parent = self.parentWidget()
+        if parent is not None:
             self.resize(parent.size())
         self.raise_(); self.show()
         self._timer.start(16)
@@ -568,7 +549,7 @@ class TransitionFlash(QWidget):
         p.drawText(QRectF(0, 0, w, h), Qt.AlignmentFlag.AlignCenter, self.text)
 
 
-# ============ PROFILE PANEL (always visible, bottom-right) ============
+# ============ PROFILE PANEL ============
 class ProfilePanel(QFrame):
     def __init__(self, parent):
         super().__init__(parent)
@@ -681,6 +662,15 @@ class ProfilePanel(QFrame):
         self.save_btn.clicked.connect(self._save)
         layout.addWidget(self.save_btn)
 
+    def keyPressEvent(self, e):
+        if e.key() == Qt.Key.Key_Escape:
+            focused = QApplication.focusWidget()
+            if isinstance(focused, QLineEdit):
+                focused.clearFocus()
+            e.ignore()
+            return
+        super().keyPressEvent(e)
+
     def _section_label(self, text):
         lbl = QLabel(text); lbl.setObjectName("sectionLabel")
         return lbl
@@ -701,7 +691,7 @@ class ProfilePanel(QFrame):
             name = os.path.basename(path)
             if len(name) > 26:
                 name = name[:23] + "..."
-            self.file_btn.setText(f"✓  {name}")
+            self.file_btn.setText(f"v  {name}")
 
     def _save(self):
         self.data["github"] = self.gh_input.text().strip()
@@ -730,11 +720,17 @@ class MainWindow(QMainWindow):
         self.mode = "neutral"
         self.mesh_enabled = True
 
+        # Face stabilization state
+        self.face_history = deque(maxlen=FACE_PRESENCE_WINDOW)
+        self.miss_streak = 0
+        self.cached_pts = None
+        self.cached_raw = None
+        self.cached_metrics = None
+
         self.video = VideoWidget()
         self.video.clicked.connect(self.analyzer.cycle_face)
         self.setCentralWidget(self.video)
 
-        # Overlays parented to video
         self.emotion_pill = GlassPill("", QColor(180, 180, 180))
         self.emotion_pill.setParent(self.video); self.emotion_pill.hide()
 
@@ -764,12 +760,11 @@ class MainWindow(QMainWindow):
         self.showFullScreen()
 
     def keyPressEvent(self, e):
-        # Esc and Q always quit, regardless of focus
-        if e.key() == Qt.Key.Key_Escape:
+        # Esc and Q always quit
+        if e.key() in (Qt.Key.Key_Escape, Qt.Key.Key_Q):
             self.close()
             return
 
-        # Other shortcuts skip when typing
         focused = QApplication.focusWidget()
         if isinstance(focused, QLineEdit):
             super().keyPressEvent(e)
@@ -789,29 +784,23 @@ class MainWindow(QMainWindow):
         w, h = self.video.width(), self.video.height()
         margin = 24
 
-        # Top-left: emotion pill
         self.emotion_pill.adjustSize()
         self.emotion_pill.move(margin, margin)
 
-        # Top-right: mode badge
         self.mode_badge.adjustSize()
         self.mode_badge.move(w - self.mode_badge.width() - margin, margin)
 
-        # Bottom-center: caption
         self.caption_pill.adjustSize()
         self.caption_pill.move((w - self.caption_pill.width()) // 2,
                                h - self.caption_pill.height() - margin - 8)
 
-        # Bottom-right: profile panel (always visible)
         self.profile_panel.move(w - self.profile_panel.width() - margin,
                                 h - self.profile_panel.height() - margin)
 
-        # Above profile panel: progress ring
         self.progress_ring.move(
             w - self.progress_ring.width() - margin,
             h - self.profile_panel.height() - self.progress_ring.height() - margin - 8)
 
-        # Bottom-left: hint
         self.hint.adjustSize()
         self.hint.move(margin, h - self.hint.height() - 16)
 
@@ -835,9 +824,32 @@ class MainWindow(QMainWindow):
         h, w = frame.shape[:2]
         pts, raw, metrics = self._analyze(frame, w, h)
 
-        send_pts = pts if self.mesh_enabled else None
-        send_raw = raw if self.mesh_enabled else None
-        send_metrics = metrics if self.mesh_enabled else None
+        # Face presence stabilization
+        self.face_history.append(pts is not None)
+        if pts is not None:
+            self.miss_streak = 0
+            self.cached_pts, self.cached_raw, self.cached_metrics = pts, raw, metrics
+        else:
+            self.miss_streak += 1
+
+        # Show mesh from cache during brief drops, but only if we've been
+        # consistently seeing a face recently (>50% of recent frames)
+        face_present_recently = sum(self.face_history) >= len(self.face_history) // 2
+        if pts is not None:
+            send_pts, send_raw, send_metrics = pts, raw, metrics
+        elif (face_present_recently
+              and self.miss_streak <= FACE_LOSS_GRACE
+              and self.cached_pts is not None):
+            send_pts, send_raw, send_metrics = (self.cached_pts,
+                                                self.cached_raw,
+                                                self.cached_metrics)
+        else:
+            send_pts, send_raw, send_metrics = None, None, None
+            self.cached_pts = None  # fully drop cache once grace expires
+
+        if not self.mesh_enabled:
+            send_pts = send_raw = send_metrics = None
+
         self.video.update_frame(frame, send_pts, send_raw, send_metrics, self.mode)
 
         emo = self.analyzer.get_state()["emotion"]
