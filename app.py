@@ -179,274 +179,278 @@ class GestureDetector:
         self.recognizer.close()
 
 
-# ============ HOLOGRAPHIC FACE MESH (drawn with QPainter) ============
 # ============ HOLOGRAPHIC FACE OVERLAY ============
 class MeshRenderer:
-    """Sci-fi targeting overlay. Brackets, depth shading, glitch lines, data labels."""
+    """Sci-fi targeting overlay: angular wireframe, real telemetry, glitch effects."""
 
-    # Connections to render as the wireframe (subset of ALL_CONNECTIONS for speed)
-    # We use ALL_CONNECTIONS but render the FACE_OVAL separately for the bracket effect
-    KEY_NODES = [33, 133, 263, 362, 1, 152, 10, 234, 454, 13, 14, 61, 291, 168, 6]
-    DATA_NODES = [33, 263, 1, 152, 234, 454]  # nodes that get readout labels
+    # Indices used as anchor points for telemetry labels
+    DATA_ANCHORS = {
+        33:  ("L_EYE", "eye_w"),       # left eye outer
+        263: ("R_EYE", "eye_w"),       # right eye outer
+        1:   ("NOSE", "nose_w"),       # nose tip
+        152: ("CHIN", "face_h"),       # chin
+        234: ("L_JAW", "jaw_w"),       # left face edge
+        454: ("R_JAW", "jaw_w"),       # right face edge
+        13:  ("LIP", "lip_r"),         # upper lip
+    }
 
-    # Face oval indices (perimeter) — used for bracket corners
-    FACE_OVAL_PTS = [10, 338, 297, 332, 284, 251, 389, 356, 454, 323, 361, 288,
-                     397, 365, 379, 378, 400, 377, 152, 148, 176, 149, 150, 136,
-                     172, 58, 132, 93, 234, 127, 162, 21, 54, 103, 67, 109]
+    # Diagonal cross-bracing connections — the "tech" look comes from
+    # bracing the wireframe with non-anatomical lines, not from the mesh itself.
+    BRACE_LINES = [
+        (33, 263),    # eye-to-eye
+        (33, 152),    # left eye to chin
+        (263, 152),   # right eye to chin
+        (234, 454),   # cheek-to-cheek
+        (10, 152),    # forehead to chin
+        (61, 291),    # mouth corners
+    ]
 
     def __init__(self):
         self.t = 0
         self.particles = []
         self.glitch_timer = 0
-        self.last_pts = None  # for motion trails
-        self.data_values = {}  # cached random-looking readouts per node
-        self.data_refresh = 0
-        # Pre-generate "data" strings (realistic-looking gibberish)
-        self._refresh_data()
+        self.last_pts = None
 
-    def _refresh_data(self):
-        """Generate fake telemetry strings for data labels."""
-        self.data_values = {
-            n: f"{np.random.randint(0, 999):03d}.{np.random.randint(0, 99):02d}"
-            for n in self.DATA_NODES
-        }
+    def _real_telemetry(self, metrics, landmarks):
+        """Build dict of {anchor_idx: 'LABEL value'} from real measurements."""
+        out = {}
+        face_w = metrics.get("fwhr", 0)
+        # Eye width in normalized coords (left eye)
+        if landmarks:
+            l_inner = landmarks[133]; l_outer = landmarks[33]
+            r_inner = landmarks[362]; r_outer = landmarks[263]
+            l_eye_w = math.hypot(l_inner.x - l_outer.x, l_inner.y - l_outer.y)
+            r_eye_w = math.hypot(r_inner.x - r_outer.x, r_inner.y - r_outer.y)
+            nose_w_lm = math.hypot(landmarks[129].x - landmarks[358].x,
+                                   landmarks[129].y - landmarks[358].y)
+        else:
+            l_eye_w = r_eye_w = nose_w_lm = 0
 
-    def draw(self, painter: QPainter, pts, mode, w, h, landmarks=None):
-        """pts: 478 (x,y) tuples. landmarks: original mp landmarks (for z-depth)."""
+        out[33] = f"L.EYE  {l_eye_w*1000:5.1f}"
+        out[263] = f"R.EYE  {r_eye_w*1000:5.1f}"
+        out[1] = f"NOSE.W {nose_w_lm*1000:5.1f}"
+        out[152] = f"FWHR   {metrics.get('fwhr', 0):.2f}"
+        out[234] = f"JAW    {metrics.get('jaw_ratio', 0):.2f}"
+        out[454] = f"SYM    {metrics.get('symmetry', 0):.1f}%"
+        out[13] = f"LIP.R  {metrics.get('lip_ratio', 0):.2f}"
+        return out
+
+    def draw(self, painter: QPainter, pts, mode, w, h,
+             landmarks=None, metrics=None):
         self.t += 1
-        if self.t % 30 == 0:
-            self._refresh_data()
-
         color = MODE_COLORS[mode]
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
 
-        # Bounding box of face for brackets/HUD
-        xs = [p[0] for p in pts]
-        ys = [p[1] for p in pts]
+        # Face bounding box (for brackets, reticle, scan)
+        xs = [p[0] for p in pts]; ys = [p[1] for p in pts]
         fx1, fx2 = min(xs), max(xs)
         fy1, fy2 = min(ys), max(ys)
-        face_w = fx2 - fx1
-        face_h = fy2 - fy1
+        face_w = fx2 - fx1; face_h = fy2 - fy1
         cx, cy = (fx1 + fx2) / 2, (fy1 + fy2) / 2
 
-        # ======== LAYER 1: motion-trail wireframe (previous frame ghosted) ========
-        if self.last_pts is not None and len(self.last_pts) == len(pts):
-            ghost = QColor(color)
-            ghost.setAlpha(35)
-            ghost_pen = QPen(ghost, 0.8)
-            painter.setPen(ghost_pen)
-            for a, b in ALL_CONNECTIONS:
-                painter.drawLine(self.last_pts[a][0], self.last_pts[a][1],
-                                 self.last_pts[b][0], self.last_pts[b][1])
-
-        # ======== LAYER 2: depth-shaded wireframe ========
-        # Color intensity varies with z (closer = brighter)
-        if landmarks is not None:
+        # Pre-compute z-depth for shading
+        if landmarks:
             zs = [lm.z for lm in landmarks]
             z_min, z_max = min(zs), max(zs)
             z_range = max(0.001, z_max - z_min)
         else:
             zs = None
 
-        # Outer glow pass (wide, low alpha)
-        glow = QColor(color)
-        glow.setAlpha(28)
-        glow_pen = QPen(glow, 5)
-        glow_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        painter.setPen(glow_pen)
-        for a, b in ALL_CONNECTIONS:
-            painter.drawLine(pts[a][0], pts[a][1], pts[b][0], pts[b][1])
+        # ========== LAYER 1: ghost wireframe (motion trail) ==========
+        if self.last_pts is not None and len(self.last_pts) == len(pts):
+            ghost = QColor(color); ghost.setAlpha(25)
+            painter.setPen(QPen(ghost, 0.6))
+            for a, b in ALL_CONNECTIONS:
+                painter.drawLine(self.last_pts[a][0], self.last_pts[a][1],
+                                 self.last_pts[b][0], self.last_pts[b][1])
 
-        # Core wireframe with depth-based alpha
+        # ========== LAYER 2: depth-shaded wireframe (no glow halo) ==========
+        # Single-pass thin lines — no fat outer glow, no soft halos.
+        # Depth controls alpha so closer features are crisp, far features fade.
         for a, b in ALL_CONNECTIONS:
             if zs is not None:
                 z_avg = (zs[a] + zs[b]) / 2
-                # Closer points are more negative z → brighter
-                t = 1.0 - (z_avg - z_min) / z_range
-                alpha = int(80 + 140 * t)
-                width = 0.6 + 1.0 * t
+                t = 1.0 - (z_avg - z_min) / z_range  # 0=far, 1=close
+                alpha = int(50 + 130 * t)
             else:
-                alpha = 180
-                width = 1.0
-            c = QColor(color)
-            c.setAlpha(alpha)
-            pen = QPen(c, width)
-            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-            painter.setPen(pen)
+                alpha = 150
+            c = QColor(color); c.setAlpha(alpha)
+            painter.setPen(QPen(c, 0.7))
             painter.drawLine(pts[a][0], pts[a][1], pts[b][0], pts[b][1])
 
-        # ======== LAYER 3: scan line with afterglow trail ========
-        sweep_period = 90
-        sweep_phase = (self.t % sweep_period) / sweep_period
-        scan_y = fy1 + face_h * sweep_phase
+        # ========== LAYER 3: cross-bracing diagonals ==========
+        # These are the lines that don't follow anatomy — give it the
+        # "engineered scaffold" look instead of "skin texture" look.
+        brace_color = QColor(color); brace_color.setAlpha(110)
+        brace_pen = QPen(brace_color, 0.9)
+        brace_pen.setStyle(Qt.PenStyle.DashLine)
+        brace_pen.setDashPattern([6, 4])
+        painter.setPen(brace_pen)
+        for a, b in self.BRACE_LINES:
+            painter.drawLine(pts[a][0], pts[a][1], pts[b][0], pts[b][1])
 
-        # Trailing afterglow (3 fading bands behind the scan line)
-        for i in range(3):
-            offset = (i + 1) * 8
-            trail_y = scan_y - offset
-            trail_alpha = int(70 * (1 - i / 3))
-            tc = QColor(255, 255, 255, trail_alpha)
-            tpen = QPen(tc, 1.2)
-            painter.setPen(tpen)
+        # ========== LAYER 4: scan line with afterglow ==========
+        sweep_period = 110
+        phase = (self.t % sweep_period) / sweep_period
+        scan_y = fy1 + face_h * phase
+
+        for i in range(4):
+            offset = (i + 1) * 6
+            tr_y = scan_y - offset
+            tr_alpha = int(90 * (1 - i / 4))
+            painter.setPen(QPen(QColor(255, 255, 255, tr_alpha), 0.8))
             for a, b in ALL_CONNECTIONS:
                 ya, yb = pts[a][1], pts[b][1]
-                if min(ya, yb) <= trail_y <= max(ya, yb):
+                if min(ya, yb) <= tr_y <= max(ya, yb):
                     painter.drawLine(pts[a][0], pts[a][1], pts[b][0], pts[b][1])
 
-        # Bright scan line itself
-        scan_color = QColor(255, 255, 255, 255)
-        scan_pen = QPen(scan_color, 2.2)
-        painter.setPen(scan_pen)
+        painter.setPen(QPen(QColor(255, 255, 255, 255), 1.5))
         for a, b in ALL_CONNECTIONS:
             ya, yb = pts[a][1], pts[b][1]
             if min(ya, yb) <= scan_y <= max(ya, yb):
                 painter.drawLine(pts[a][0], pts[a][1], pts[b][0], pts[b][1])
 
-        # ======== LAYER 4: targeting brackets at face corners ========
-        bracket_color = QColor(color)
-        bracket_color.setAlpha(230)
-        bracket_pen = QPen(bracket_color, 2.5)
-        bracket_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        painter.setPen(bracket_pen)
+        # ========== LAYER 5: angular targeting brackets ==========
+        bracket_color = QColor(color); bracket_color.setAlpha(230)
+        painter.setPen(QPen(bracket_color, 2))
+        breath = math.sin(self.t * 0.05) * 3
+        pad = 22 + breath
+        bl = max(10, face_w * 0.13)
 
-        # Subtle breathing animation
-        breath = math.sin(self.t * 0.05) * 4
-        pad = 18 + breath
-        bl = max(8, face_w * 0.12)  # bracket leg length
+        corners = [
+            (fx1 - pad, fy1 - pad, 1, 1),    # TL: legs go right and down
+            (fx2 + pad, fy1 - pad, -1, 1),   # TR
+            (fx1 - pad, fy2 + pad, 1, -1),   # BL
+            (fx2 + pad, fy2 + pad, -1, -1),  # BR
+        ]
+        for x, y, dx, dy in corners:
+            painter.drawLine(int(x), int(y), int(x + bl * dx), int(y))
+            painter.drawLine(int(x), int(y), int(x), int(y + bl * dy))
 
-        # Top-left
-        painter.drawLine(int(fx1 - pad), int(fy1 - pad + bl),
-                         int(fx1 - pad), int(fy1 - pad))
-        painter.drawLine(int(fx1 - pad), int(fy1 - pad),
-                         int(fx1 - pad + bl), int(fy1 - pad))
-        # Top-right
-        painter.drawLine(int(fx2 + pad - bl), int(fy1 - pad),
-                         int(fx2 + pad), int(fy1 - pad))
-        painter.drawLine(int(fx2 + pad), int(fy1 - pad),
-                         int(fx2 + pad), int(fy1 - pad + bl))
-        # Bottom-left
-        painter.drawLine(int(fx1 - pad), int(fy2 + pad - bl),
-                         int(fx1 - pad), int(fy2 + pad))
-        painter.drawLine(int(fx1 - pad), int(fy2 + pad),
-                         int(fx1 - pad + bl), int(fy2 + pad))
-        # Bottom-right
-        painter.drawLine(int(fx2 + pad - bl), int(fy2 + pad),
-                         int(fx2 + pad), int(fy2 + pad))
-        painter.drawLine(int(fx2 + pad), int(fy2 + pad - bl),
-                         int(fx2 + pad), int(fy2 + pad))
-
-        # ======== LAYER 5: rotating reticle around face center ========
-        reticle_r = max(face_w, face_h) / 2 + 30 + breath
-        rot_angle = (self.t * 1.2) % 360
-        reticle_color = QColor(color)
-        reticle_color.setAlpha(120)
-        rpen = QPen(reticle_color, 1.4)
-        painter.setPen(rpen)
-        # Draw 4 arc segments rotating around the face
+        # ========== LAYER 6: rotating reticle + center crosshair ==========
+        reticle_r = max(face_w, face_h) / 2 + 32 + breath
+        rot = (self.t * 1.4) % 360
+        ret_color = QColor(color); ret_color.setAlpha(140)
+        painter.setPen(QPen(ret_color, 1.2))
         for i in range(4):
-            start_deg = rot_angle + i * 90
+            start = rot + i * 90
             painter.drawArc(QRectF(cx - reticle_r, cy - reticle_r,
                                     reticle_r * 2, reticle_r * 2),
-                            int(start_deg * 16), int(20 * 16))
+                            int(start * 16), int(22 * 16))
 
-        # Crosshair at face center
-        ch_color = QColor(color)
-        ch_color.setAlpha(180)
-        chpen = QPen(ch_color, 1.2)
-        painter.setPen(chpen)
-        painter.drawLine(int(cx - 12), int(cy), int(cx - 4), int(cy))
-        painter.drawLine(int(cx + 4), int(cy), int(cx + 12), int(cy))
-        painter.drawLine(int(cx), int(cy - 12), int(cx), int(cy - 4))
-        painter.drawLine(int(cx), int(cy + 4), int(cx), int(cy + 12))
+        # Tiny tick marks at cardinal points around face
+        tick_r_inner = reticle_r - 6
+        tick_r_outer = reticle_r + 6
+        for deg in (0, 90, 180, 270):
+            rad = math.radians(deg)
+            painter.drawLine(int(cx + math.cos(rad) * tick_r_inner),
+                             int(cy + math.sin(rad) * tick_r_inner),
+                             int(cx + math.cos(rad) * tick_r_outer),
+                             int(cy + math.sin(rad) * tick_r_outer))
 
-        # ======== LAYER 6: glowing key landmark nodes ========
-        pulse = 0.5 + 0.5 * math.sin(self.t * 0.18)
-        for idx in self.KEY_NODES:
-            cx_n, cy_n = pts[idx]
-            # Wide outer halo
-            grad = QRadialGradient(QPointF(cx_n, cy_n), 18)
-            c1 = QColor(color); c1.setAlpha(int(120 * pulse + 40))
-            c2 = QColor(color); c2.setAlpha(0)
-            grad.setColorAt(0, c1)
-            grad.setColorAt(1, c2)
-            painter.setBrush(QBrush(grad))
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.drawEllipse(QPointF(cx_n, cy_n), 18, 18)
-            # Bright core
-            painter.setBrush(QBrush(QColor(255, 255, 255, 255)))
-            painter.drawEllipse(QPointF(cx_n, cy_n), 2.8, 2.8)
-            # Ring outline
-            ring_pen = QPen(color, 1.2)
-            painter.setPen(ring_pen)
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.drawEllipse(QPointF(cx_n, cy_n), 5, 5)
+        # Center crosshair (small, sharp)
+        ch_color = QColor(color); ch_color.setAlpha(200)
+        painter.setPen(QPen(ch_color, 1))
+        painter.drawLine(int(cx - 10), int(cy), int(cx - 3), int(cy))
+        painter.drawLine(int(cx + 3), int(cy), int(cx + 10), int(cy))
+        painter.drawLine(int(cx), int(cy - 10), int(cx), int(cy - 3))
+        painter.drawLine(int(cx), int(cy + 3), int(cx), int(cy + 10))
 
-        # ======== LAYER 7: data readouts on select nodes ========
-        font = QFont("Consolas", 8)
+        # ========== LAYER 7: angular landmark markers (no fat dots) ==========
+        marker_color = QColor(color); marker_color.setAlpha(220)
+        painter.setPen(QPen(marker_color, 1.2))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        for idx in self.DATA_ANCHORS:
+            x, y = pts[idx]
+            # Small diamond outline (4px radius) — sharper than a circle
+            diamond = QPainterPath()
+            diamond.moveTo(x, y - 4)
+            diamond.lineTo(x + 4, y)
+            diamond.lineTo(x, y + 4)
+            diamond.lineTo(x - 4, y)
+            diamond.closeSubpath()
+            painter.drawPath(diamond)
+            # Small center pixel
+            painter.fillRect(int(x), int(y), 1, 1, marker_color)
+
+        # ========== LAYER 8: real telemetry labels ==========
+        telemetry = self._real_telemetry(metrics or {}, landmarks)
+
+        font = QFont("Consolas", 9)
         font.setWeight(QFont.Weight.Bold)
-        font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 0.5)
         painter.setFont(font)
-        for idx in self.DATA_NODES:
-            cx_n, cy_n = pts[idx]
-            value = self.data_values.get(idx, "000.00")
-            # Draw a short connector line
-            offset_x = 28 if cx_n > cx else -28
-            offset_y = -14
-            tx, ty = cx_n + offset_x, cy_n + offset_y
-            line_color = QColor(color)
-            line_color.setAlpha(160)
-            painter.setPen(QPen(line_color, 1))
-            painter.drawLine(int(cx_n), int(cy_n), int(tx), int(ty))
-            painter.drawLine(int(tx), int(ty),
-                             int(tx + (15 if offset_x > 0 else -15)), int(ty))
-            # Background pill for text
-            text_color = QColor(color)
-            text_color.setAlpha(255)
-            painter.setPen(QPen(text_color))
-            text_x = tx + (18 if offset_x > 0 else -18)
-            painter.drawText(QPointF(text_x if offset_x > 0 else text_x - 40,
-                                     ty + 3), value)
 
-        # ======== LAYER 8: glitch/chromatic offset (occasional) ========
+        label_color = QColor(color); label_color.setAlpha(240)
+        line_color = QColor(color); line_color.setAlpha(140)
+
+        for idx, value in telemetry.items():
+            if idx >= len(pts):
+                continue
+            x, y = pts[idx]
+            # Decide which side to put label on (away from face center)
+            side = 1 if x > cx else -1
+            elbow_x = x + side * 35
+            elbow_y = y - 16
+            label_x = elbow_x + side * 8
+            text_w = painter.fontMetrics().horizontalAdvance(value)
+
+            # Leader line: short out, then horizontal
+            painter.setPen(QPen(line_color, 1))
+            painter.drawLine(int(x), int(y), int(elbow_x), int(elbow_y))
+            end_x = label_x + (text_w if side > 0 else -text_w)
+            painter.drawLine(int(elbow_x), int(elbow_y), int(end_x), int(elbow_y))
+
+            # Tiny tick at label end
+            painter.drawLine(int(end_x), int(elbow_y - 3),
+                             int(end_x), int(elbow_y + 3))
+
+            # Text
+            painter.setPen(QPen(label_color))
+            text_x = label_x if side > 0 else label_x - text_w
+            painter.drawText(QPointF(text_x, elbow_y + 3), value)
+
+        # ========== LAYER 9: glitch chromatic offset ==========
         if self.glitch_timer > 0:
             self.glitch_timer -= 1
-            offset = np.random.randint(-3, 4)
-            glitch_color = QColor(255, 50, 50, 120)
-            painter.setPen(QPen(glitch_color, 1))
-            for a, b in ALL_CONNECTIONS[::4]:  # every 4th line
+            offset = np.random.randint(-4, 5)
+            painter.setPen(QPen(QColor(255, 50, 50, 140), 0.8))
+            for a, b in ALL_CONNECTIONS[::3]:
                 painter.drawLine(pts[a][0] + offset, pts[a][1],
                                  pts[b][0] + offset, pts[b][1])
-        elif np.random.random() < 0.005:  # rare random glitch
-            self.glitch_timer = 4
+            painter.setPen(QPen(QColor(50, 200, 255, 140), 0.8))
+            for a, b in ALL_CONNECTIONS[1::3]:
+                painter.drawLine(pts[a][0] - offset, pts[a][1],
+                                 pts[b][0] - offset, pts[b][1])
+        elif np.random.random() < 0.006:
+            self.glitch_timer = 5
 
-        # ======== LAYER 9: spark particles ========
-        if self.t % 6 == 0 and len(self.particles) < 30:
-            idx = np.random.choice(self.KEY_NODES)
+        # ========== LAYER 10: spark particles ==========
+        if self.t % 7 == 0 and len(self.particles) < 20:
+            idx = np.random.choice(list(self.DATA_ANCHORS.keys()))
             angle = np.random.uniform(0, math.tau)
-            speed = np.random.uniform(2.5, 5)
+            speed = np.random.uniform(2, 4)
             self.particles.append({
                 "x": pts[idx][0], "y": pts[idx][1],
                 "vx": math.cos(angle) * speed, "vy": math.sin(angle) * speed,
-                "life": 22, "max_life": 22,
+                "life": 18, "max": 18,
             })
 
-        new_particles = []
+        new_p = []
         for p in self.particles:
             p["x"] += p["vx"]; p["y"] += p["vy"]
-            p["vx"] *= 0.96; p["vy"] *= 0.96  # drag
+            p["vx"] *= 0.94; p["vy"] *= 0.94
             p["life"] -= 1
             if p["life"] > 0:
-                t = p["life"] / p["max_life"]
-                pc = QColor(color); pc.setAlpha(int(255 * t))
-                painter.setBrush(QBrush(pc))
+                t = p["life"] / p["max"]
+                pc = QColor(color); pc.setAlpha(int(220 * t))
                 painter.setPen(Qt.PenStyle.NoPen)
-                size = 1.5 + t * 1.5
-                painter.drawEllipse(QPointF(p["x"], p["y"]), size, size)
-                new_particles.append(p)
-        self.particles = new_particles
+                painter.setBrush(QBrush(pc))
+                # Square sparks instead of round — more "pixel" / "tech" feel
+                s = max(1, int(2 * t))
+                painter.fillRect(int(p["x"]), int(p["y"]), s, s, pc)
+                new_p.append(p)
+        self.particles = new_p
 
-        # Save current pts for next frame's motion trail
         self.last_pts = list(pts)
         
 
@@ -468,7 +472,7 @@ class VideoWidget(QLabel):
         if e.button() == Qt.MouseButton.LeftButton:
             self.clicked.emit()
 
-    def update_frame(self, bgr_frame, landmarks_pts, landmarks_raw, mode):
+    def update_frame(self, bgr_frame, landmarks_pts, landmarks_raw, metrics, mode):
         self.landmarks_pts = landmarks_pts
         self.mode = mode
 
@@ -478,7 +482,8 @@ class VideoWidget(QLabel):
 
         if landmarks_pts is not None:
             painter = QPainter(qimg)
-            self.mesh.draw(painter, landmarks_pts, mode, w, h, landmarks_raw)
+            self.mesh.draw(painter, landmarks_pts, mode, w, h,
+                        landmarks_raw, metrics)
             painter.end()
 
         pix = QPixmap.fromImage(qimg)
@@ -720,9 +725,8 @@ class MainWindow(QMainWindow):
             self.caption_pill.set_color(MODE_COLORS[self.mode])
 
         h, w = frame.shape[:2]
-        landmarks_pts, landmarks_raw = self._analyze_face(frame, w, h)
-
-        self.video.update_frame(frame, landmarks_pts, landmarks_raw, self.mode)
+        landmarks_pts, landmarks_raw, metrics = self._analyze_face(frame, w, h)
+        self.video.update_frame(frame, landmarks_pts, landmarks_raw, metrics, self.mode)
 
         state = self.analyzer.get_state()
         emo = state["emotion"]
@@ -746,7 +750,7 @@ class MainWindow(QMainWindow):
         faces = result.face_landmarks or []
         if not faces:
             self.analyzer.last_clean_frame = frame.copy()
-            return None, None
+            return None, None, None
 
         from cvModule import order_faces, compute_metrics, emotion_from_blendshapes
         ordered = order_faces(faces, w, h)
@@ -765,7 +769,7 @@ class MainWindow(QMainWindow):
         if time.time() - self.analyzer.smoother.last_update >= 2.0:
             self.analyzer.smoother.commit()
 
-        return pts, locked_lm  # return raw landmarks too
+        return pts, locked_lm, metrics
 
     def closeEvent(self, e):
         self.timer.stop()
