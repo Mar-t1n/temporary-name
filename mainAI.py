@@ -2,6 +2,7 @@ import os
 import requests
 from dotenv import load_dotenv
 from elevenlabs.client import ElevenLabs
+from typing import Any, cast
 from elevenlabs.play import play
 from githubinfo import fetch_github_profile
 from linkedin_profile import fetch_profile, parse_profile
@@ -183,9 +184,14 @@ if eleven_key:
         eleven = ElevenLabs(api_key=eleven_key)
         audio = eleven.text_to_speech.convert(
             text=response_text,
-            voice_id="JBFqnCBsd6RMkjVDRZzb",
-            model_id="eleven_v3",
+            voice_id="gE0owC0H9C8SzfDyIUtB",
+            model_id="eleven_flash_v2_5",
             output_format="mp3_44100_128",
+                voice_settings=cast(Any, {
+                    "stability": 0.5,
+                    "similarity_boost": 0.75,
+                    "speed": 1,  # 1.0 is normal, go up to 2.0 for fast
+                })
         )
         play(audio)
     except Exception as e:
