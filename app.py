@@ -23,9 +23,14 @@ from PyQt6.QtGui import (QImage, QPixmap, QPainter, QColor, QFont, QPen,
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QLabel, QWidget,
                              QVBoxLayout, QHBoxLayout, QPushButton,
                              QGraphicsDropShadowEffect, QLineEdit, QFileDialog,
-                             QFrame)
+                             QFrame, QPlainTextEdit, QTabWidget)
 
 from cvModule import FaceAnalyzer, ALL_CONNECTIONS
+import threading
+import json
+import pathlib
+import ai_core
+from functools import partial
 
 # ============ CONFIG ============
 GESTURE_MODEL_URL = "https://storage.googleapis.com/mediapipe-models/gesture_recognizer/gesture_recognizer/float16/1/gesture_recognizer.task"
@@ -36,6 +41,10 @@ GESTURE_WINDOW = 12
 GESTURE_COOLDOWN = 1.2
 MISS_TOLERANCE = 10
 MIN_HAND_CONFIDENCE = 0.55
+GESTURE_SAMPLE_EVERY = 2
+FACE_SAMPLE_EVERY = 2
+ANALYSIS_MAX_WIDTH = 640
+GUI_TICK_MS = 30
 
 FACE_PRESENCE_WINDOW = 8     # how many recent frames to track for face presence
 FACE_LOSS_GRACE = 6          # frames of "no face" before we actually drop the mesh
@@ -554,8 +563,8 @@ class ProfilePanel(QFrame):
     def __init__(self, parent):
         super().__init__(parent)
         self.setObjectName("profilePanel")
-        self.setFixedSize(320, 290)
-        self.data = {"github": "", "linkedin": "", "resume_path": ""}
+        self.setFixedSize(320, 450)  # Increased height for resume text
+        self.data = {"github": "", "linkedin": "", "resume_path": "", "resume_text": ""}
 
         accent = ACCENT
         ar, ag, ab = accent.red(), accent.green(), accent.blue()
@@ -593,12 +602,28 @@ class ProfilePanel(QFrame):
                 font-size: 12px;
                 selection-background-color: rgba({ar},{ag},{ab}, 100);
             }}
+            QPlainTextEdit {{
+                background: transparent;
+                border: none;
+                color: rgba(200, 200, 220, 255);
+                padding: 6px 4px;
+                font-size: 10px;
+                selection-background-color: rgba({ar},{ag},{ab}, 100);
+            }}
             QFrame#prefixGroup {{
                 background-color: rgba(0, 0, 0, 110);
                 border: 1px solid rgba(255, 255, 255, 30);
                 border-radius: 7px;
             }}
             QFrame#prefixGroup:focus-within {{
+                border: 1px solid rgba({ar},{ag},{ab}, 200);
+            }}
+            QFrame#resumeBox {{
+                background-color: rgba(0, 0, 0, 110);
+                border: 1px solid rgba(255, 255, 255, 30);
+                border-radius: 7px;
+            }}
+            QFrame#resumeBox:focus-within {{
                 border: 1px solid rgba({ar},{ag},{ab}, 200);
             }}
             QPushButton#fileBtn {{
@@ -636,11 +661,11 @@ class ProfilePanel(QFrame):
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 16, 20, 16)
-        layout.setSpacing(10)
+        layout.setSpacing(8)
 
         title = QLabel("PROFILE"); title.setObjectName("title")
         layout.addWidget(title)
-        layout.addSpacing(4)
+        layout.addSpacing(2)
 
         layout.addWidget(self._section_label("GITHUB"))
         self.gh_input = QLineEdit(); self.gh_input.setPlaceholderText("username")
@@ -651,16 +676,43 @@ class ProfilePanel(QFrame):
         layout.addWidget(self._with_prefix("linkedin.com/in/", self.li_input))
 
         layout.addWidget(self._section_label("RESUME"))
-        self.file_btn = QPushButton("Upload PDF / DOCX")
+        self.file_btn = QPushButton("Upload PDF / DOCX / TXT")
         self.file_btn.setObjectName("fileBtn")
         self.file_btn.clicked.connect(self._pick_resume)
         layout.addWidget(self.file_btn)
+
+        layout.addWidget(self._section_label("RESUME TEXT (optional)"))
+        resume_box = QFrame(); resume_box.setObjectName("resumeBox")
+        resume_layout = QVBoxLayout(resume_box); resume_layout.setContentsMargins(4, 4, 4, 4)
+        self.resume_text_input = QPlainTextEdit()
+        self.resume_text_input.setPlaceholderText("Paste resume content here (overrides file)")
+        self.resume_text_input.setMaximumHeight(80)
+        resume_layout.addWidget(self.resume_text_input)
+        layout.addWidget(resume_box)
 
         layout.addSpacing(2)
         self.save_btn = QPushButton("SAVE")
         self.save_btn.setObjectName("saveBtn")
         self.save_btn.clicked.connect(self._save)
         layout.addWidget(self.save_btn)
+
+        # When inputs change, clear saved state so we don't reuse stale cache
+        self._saved_ready = False
+        self.gh_input.textChanged.connect(self._on_edited)
+        self.li_input.textChanged.connect(self._on_edited)
+        self.resume_text_input.textChanged.connect(self._on_edited)
+
+    def _on_edited(self):
+        print("[DEBUG:PROFILE] Input field edited, clearing saved state")
+        if self._saved_ready:
+            self._saved_ready = False
+            self.save_btn.setText("SAVE")
+
+    def _mark_saved(self):
+        print("[DEBUG:PROFILE] Scraping complete, marking as saved")
+        self._saved_ready = True
+        self.save_btn.setText("SAVED ✓")
+        QTimer.singleShot(1600, lambda: self.save_btn.setText("SAVED ✓"))
 
     def keyPressEvent(self, e):
         if e.key() == Qt.Key.Key_Escape:
@@ -685,7 +737,7 @@ class ProfilePanel(QFrame):
     def _pick_resume(self):
         path, _ = QFileDialog.getOpenFileName(
             self, "Select your resume", "",
-            "Documents (*.pdf *.doc *.docx);;All files (*)")
+            "Documents (*.pdf *.doc *.docx *.txt);;All files (*)")
         if path:
             self.data["resume_path"] = path
             name = os.path.basename(path)
@@ -694,11 +746,27 @@ class ProfilePanel(QFrame):
             self.file_btn.setText(f"v  {name}")
 
     def _save(self):
+        print("[DEBUG:PROFILE] SAVE button clicked")
         self.data["github"] = self.gh_input.text().strip()
         self.data["linkedin"] = self.li_input.text().strip()
+        self.data["resume_text"] = self.resume_text_input.toPlainText().strip()
+        github = self.data.get("github", "")
+        linkedin = self.data.get("linkedin", "")
+        resume_path = self.data.get("resume_path", "")
+        resume_text = self.data.get("resume_text", "")
+        
+        print(f"[DEBUG:PROFILE] Profile data: github={bool(github)}, linkedin={bool(linkedin)}, resume_path={bool(resume_path)}, resume_text={len(resume_text)} chars")
+
+        # Show saving state and schedule background scrape/cache
         original = self.save_btn.text()
-        self.save_btn.setText("SAVED")
-        QTimer.singleShot(1200, lambda: self.save_btn.setText(original))
+        self.save_btn.setText("SAVING...")
+        print("[DEBUG:PROFILE] Scheduling background scrape")
+
+        def done():
+            print("[DEBUG:PROFILE] Background scrape callback fired")
+            QTimer.singleShot(0, self._mark_saved)
+
+        ai_core.schedule_background_scrape(github, linkedin, resume_path, resume_text, callback=done)
 
     def get_data(self):
         return dict(self.data)
@@ -707,18 +775,29 @@ class ProfilePanel(QFrame):
 # ============ MAIN WINDOW ============
 class MainWindow(QMainWindow):
     def __init__(self):
+        print("[DEBUG:APP] ===== FaceJudge App Starting =====")
         super().__init__()
+        print("[DEBUG:APP] Initializing MainWindow")
         self.setWindowTitle("FaceJudge")
         self.setStyleSheet("background-color: #0a0a0f;")
 
+        print("[DEBUG:APP] Loading FaceAnalyzer...")
         self.analyzer = FaceAnalyzer()
+        print("[DEBUG:APP] Loading GestureDetector...")
         self.gestures = GestureDetector()
-        self.cap = cv2.VideoCapture(0)
+        print("[DEBUG:APP] Opening camera (cv2.VideoCapture(0))")
+        self.cap = cv2.VideoCapture(1)
+        
+        # Track if AI is currently running for audio interruption
+        self.ai_running = False
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
 
         self.mode = "neutral"
         self.mesh_enabled = True
+        self._frame_index = 0
+        self._last_gesture_target = None
+        self._last_analysis = (None, None, None)
 
         # Face stabilization state
         self.face_history = deque(maxlen=FACE_PRESENCE_WINDOW)
@@ -745,7 +824,16 @@ class MainWindow(QMainWindow):
 
         self.profile_panel = ProfilePanel(self.video)
 
-        self.hint = QLabel("click: cycle face   ·   space: capture   ·   m: toggle mesh   ·   esc: quit")
+        # Recording state
+        self.recording = False
+        self.video_writer = None
+        pathlib.Path("captured-videos").mkdir(exist_ok=True)
+        self._recording_indicator = QLabel(parent=self.video)
+        self._recording_indicator.setText("")
+        self._recording_indicator.setStyleSheet("background: red; border-radius: 6px; min-width:12px; min-height:12px;")
+        self._recording_indicator.hide()
+
+        self.hint = QLabel("click: cycle face   ·   space: capture   ·   Left Shift: AI   ·   r: record   ·   m: mesh   ·   esc: quit")
         self.hint.setParent(self.video)
         self.hint.setStyleSheet("color: rgba(160,160,170,180); background: transparent;")
         self.hint.setFont(QFont("Segoe UI", 9))
@@ -755,13 +843,16 @@ class MainWindow(QMainWindow):
 
         self.timer = QTimer()
         self.timer.timeout.connect(self.tick)
-        self.timer.start(16)
+        self.timer.start(GUI_TICK_MS)
 
+        print("[DEBUG:APP] All components initialized successfully")
+        print("[DEBUG:APP] Showing fullscreen window")
         self.showFullScreen()
-
+        print("[DEBUG:APP] ===== FaceJudge Ready =====")
     def keyPressEvent(self, e):
         # Esc and Q always quit
         if e.key() in (Qt.Key.Key_Escape, Qt.Key.Key_Q):
+            print("[DEBUG:APP] Quit key pressed (Esc/Q)")
             self.close()
             return
 
@@ -771,10 +862,121 @@ class MainWindow(QMainWindow):
             return
 
         if e.key() == Qt.Key.Key_Space:
+            print("[DEBUG:APP] Space key pressed - capturing screenshot")
             self.analyzer.capture()
         elif e.key() == Qt.Key.Key_M:
             self.mesh_enabled = not self.mesh_enabled
+            print(f"[DEBUG:APP] M key pressed - mesh now {'ENABLED' if self.mesh_enabled else 'DISABLED'}")
+        elif e.key() == Qt.Key.Key_Shift:
+            # Prefer left shift only when possible to detect.
+            scan = None
+            try:
+                scan = e.nativeScanCode()
+            except Exception:
+                scan = None
+            # Common left-shift scan code on Windows is 42 (0x2A). If scan unknown, accept Shift.
+            if scan is None or scan == 42:
+                # If AI is currently running/speaking, interrupt audio on second Shift press
+                if self.ai_running:
+                    print("[DEBUG:APP] Second Shift press - interrupting audio")
+                    ai_core.stop_audio()
+                    self.ai_running = False
+                else:
+                    print("[DEBUG:APP] Left Shift key pressed - triggering AI call")
+                    self.trigger_ai()
+            else:
+                print(f"[DEBUG:APP] Shift pressed (scan={scan}) - not left shift, ignoring")
+        elif e.key() == Qt.Key.Key_R:
+            print(f"[DEBUG:APP] R key pressed - recording now {'STARTING' if not self.recording else 'STOPPING'}")
+            # Toggle screen recording
+            self._toggle_recording()
         super().keyPressEvent(e)
+
+    def _toggle_recording(self):
+        self.recording = not self.recording
+        if self.recording:
+            print("[DEBUG:RECORD] Starting screen recording")
+            # start writer
+            ts = int(time.time())
+            path = pathlib.Path("captured-videos") / f"capture_{ts}.mp4"
+            print(f"[DEBUG:RECORD] Recording to: {path}")
+            fourcc = getattr(cv2, "VideoWriter_fourcc")(*"mp4v")
+            fps = max(10, int(self.cap.get(cv2.CAP_PROP_FPS) or 20))
+            w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            print(f"[DEBUG:RECORD] Video params: {w}x{h} @ {fps} fps")
+            self.video_writer = cv2.VideoWriter(str(path), fourcc, fps, (w, h))
+            if self.video_writer.isOpened():
+                print("[DEBUG:RECORD] VideoWriter opened successfully")
+            else:
+                print("[DEBUG:RECORD] WARNING: VideoWriter failed to open")
+            self._recording_indicator.show()
+        else:
+            print("[DEBUG:RECORD] Stopping screen recording")
+            # stop writer
+            if self.video_writer is not None:
+                self.video_writer.release()
+                print("[DEBUG:RECORD] VideoWriter released")
+                self.video_writer = None
+            self._recording_indicator.hide()
+
+    def trigger_ai(self):
+        print("[DEBUG:AI_TRIGGER] Starting AI trigger sequence")
+        # Gather screenshot, face state, and cached profiles, then call AI in background
+        b64 = self.analyzer.capture_person_b64()
+        if b64:
+            print(f"[DEBUG:AI_TRIGGER] Screenshot captured: {len(b64)} chars (base64)")
+        else:
+            print("[DEBUG:AI_TRIGGER] WARNING: No face detected, skipping AI call")
+            return
+        
+        face_state = self.analyzer.get_state()
+        print(f"[DEBUG:AI_TRIGGER] Face state: emotion={face_state.get('emotion')}, mode={face_state.get('mode')}")
+
+        pdata = self.profile_panel.get_data()
+        gh = pdata.get("github")
+        li = pdata.get("linkedin")
+        resume_path = pdata.get("resume_path")
+        resume_text = pdata.get("resume_text", "")
+        
+        print(f"[DEBUG:AI_TRIGGER] Profile data collected: gh={bool(gh)}, li={bool(li)}, resume_path={bool(resume_path)}, resume_text={len(resume_text)} chars")
+
+        gh_key = f"github::{gh}" if gh else None
+        li_key = f"linkedin::{li}" if li else None
+        # For resume, we'll use resume_text directly if available, otherwise fall back to path cache
+        resume_key = f"resume::{resume_path}" if resume_path else None
+
+        print(f"[DEBUG:AI_TRIGGER] Building payload with keys: gh_key={gh_key}, li_key={li_key}, resume_key={resume_key}")
+        payload = ai_core.build_payload(b64, face_state, gh_key, li_key, resume_key)
+        
+        # Add resume text directly to payload if available
+        if resume_text:
+            print(f"[DEBUG:AI_TRIGGER] Adding resume text to payload: {len(resume_text)} chars")
+            payload["resume_text"] = resume_text
+
+        # run AI generation in background to avoid UI freeze
+        def run():
+            try:
+                mode = self.mode
+                if mode == "super_hate":
+                    chosen = "super_hate"
+                elif mode == "hate":
+                    chosen = "hate"
+                else:
+                    chosen = "glaze"
+                print(f"[DEBUG:AI_TRIGGER] Calling AI in background thread with mode={chosen}")
+                res = ai_core.call_ai_and_speak(payload, mode=chosen)
+                print(f"[DEBUG:AI_TRIGGER] AI response received: {len(res)} chars")
+                print(f"[DEBUG:AI_TRIGGER] Response text: {res[:100]}...")
+            finally:
+                self.ai_running = False
+                print("[DEBUG:AI_TRIGGER] AI call complete, resetting flag")
+
+        print("[DEBUG:AI_TRIGGER] Spawning background thread")
+        self.ai_running = True
+        t = threading.Thread(target=run, daemon=True)
+        t.start()
+        print("[DEBUG:AI_TRIGGER] Background thread started")
 
     def resizeEvent(self, e):
         super().resizeEvent(e)
@@ -803,26 +1005,43 @@ class MainWindow(QMainWindow):
 
         self.hint.adjustSize()
         self.hint.move(margin, h - self.hint.height() - 16)
+        
+        # Position recording indicator (red dot in top-left)
+        self._recording_indicator.move(margin + 10, margin + 60)
 
     def tick(self):
         ok, frame = self.cap.read()
         if not ok:
             return
         frame = cv2.flip(frame, 1)
+        self._frame_index += 1
 
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        target = self.gestures.detect(rgb)
-        new_mode = self.gestures.update_mode(self.mode, target)
-        if new_mode != self.mode:
-            self.mode = new_mode
-            self.analyzer.set_mode(self.mode)
-            self.mode_badge.set_mode(self.mode, MODE_COLORS[self.mode])
-            self.caption_pill.set_text(MODE_CAPTIONS[self.mode])
-            self.caption_pill.set_color(MODE_COLORS[self.mode])
-            self.flash.trigger(self.mode, MODE_COLORS[self.mode])
+        analysis_frame = frame
+        frame_h, frame_w = frame.shape[:2]
+        if frame_w > ANALYSIS_MAX_WIDTH:
+            scale = ANALYSIS_MAX_WIDTH / float(frame_w)
+            analysis_frame = cv2.resize(
+                frame,
+                (ANALYSIS_MAX_WIDTH, int(frame_h * scale)),
+                interpolation=cv2.INTER_AREA,
+            )
+
+        if self._frame_index % GESTURE_SAMPLE_EVERY == 0:
+            rgb = cv2.cvtColor(analysis_frame, cv2.COLOR_BGR2RGB)
+            self._last_gesture_target = self.gestures.detect(rgb)
+            new_mode = self.gestures.update_mode(self.mode, self._last_gesture_target)
+            if new_mode != self.mode:
+                self.mode = new_mode
+                self.analyzer.set_mode(self.mode)
+                self.mode_badge.set_mode(self.mode, MODE_COLORS[self.mode])
+                self.caption_pill.set_text(MODE_CAPTIONS[self.mode])
+                self.caption_pill.set_color(MODE_COLORS[self.mode])
+                self.flash.trigger(self.mode, MODE_COLORS[self.mode])
 
         h, w = frame.shape[:2]
-        pts, raw, metrics = self._analyze(frame, w, h)
+        if self._frame_index % FACE_SAMPLE_EVERY == 0:
+            self._last_analysis = self._analyze(analysis_frame, w, h)
+        pts, raw, metrics = self._last_analysis
 
         # Face presence stabilization
         self.face_history.append(pts is not None)
@@ -851,6 +1070,14 @@ class MainWindow(QMainWindow):
             send_pts = send_raw = send_metrics = None
 
         self.video.update_frame(frame, send_pts, send_raw, send_metrics, self.mode)
+
+        # If recording, write the raw frame to the video writer
+        video_writer = getattr(self, "video_writer", None)
+        if getattr(self, "recording", False) and video_writer is not None:
+            try:
+                video_writer.write(frame)
+            except Exception as e:
+                print(f"[DEBUG:RECORD] Frame write failed: {e}")
 
         emo = self.analyzer.get_state()["emotion"]
         if emo and emo != "neutral":
@@ -895,10 +1122,19 @@ class MainWindow(QMainWindow):
         return pts, lm, metrics
 
     def closeEvent(self, e):
+        print("[DEBUG:APP] ===== Shutting Down =====")
+        print("[DEBUG:APP] Stopping timer...")
         self.timer.stop()
+        print("[DEBUG:APP] Releasing camera...")
         self.cap.release()
+        if self.video_writer is not None:
+            print("[DEBUG:APP] Releasing video writer...")
+            self.video_writer.release()
+        print("[DEBUG:APP] Closing analyzer...")
         self.analyzer.close()
+        print("[DEBUG:APP] Closing gesture detector...")
         self.gestures.close()
+        print("[DEBUG:APP] FaceJudge shutdown complete")
         super().closeEvent(e)
 
 

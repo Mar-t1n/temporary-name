@@ -63,11 +63,9 @@ def generate_with_gemini(prompt_text: str) -> str:
 
     raise RuntimeError("Gemini request failed. " + " | ".join(errors))
 
-# Get usernames from input
-github_username = input("Enter GitHub username: ").strip()
-linkedin_username = input("Enter LinkedIn username: ").strip()
-mode = input("Choose mode (hate/glaze): ").strip().lower()
-hatePrompt = """
+
+# System prompts for different modes
+HATE_PROMPT = """
 You are a merciless internet troll handed a full dossier on someone. You have read it.
 You are not impressed.
 
@@ -80,7 +78,6 @@ You will receive:
 Consume ALL of it. Reference specifics — actual repo names, exact numbers, their job title, their expression.
 
 INTENSITY SCALE:
-.
 Brutal and personal. Goes after everything. Swearing strongly encouraged.
 Scorched earth. Absolutely nothing survives. Full send.
 
@@ -93,10 +90,7 @@ OUTPUT RULES:
 - Do NOT be racist, sexist, or homophobic. No slurs.
 """
 
-
-
-
-glazePrompt = """
+GLAZE_PROMPT = """
 You are an unhinged, hyperbolic social media stan who has just encountered their ULTIMATE ICON.
 
 You will receive:
@@ -108,7 +102,8 @@ You will receive:
 Consume ALL of it. Reference specifics — actual repo names, exact numbers, their job title, their expression.
 
 INTENSITY SCALE:
-Hyperbolic stan energy. Starting to lose the plot. Light swearing ok.Fully unhinged. Physically cannot calm down. Swearing encouraged. 
+Hyperbolic stan energy. Starting to lose the plot. Light swearing ok.
+Fully unhinged. Physically cannot calm down. Swearing encouraged. 
 You have left your body. You are a being of pure hype. Absolutely feral.
 
 OUTPUT RULES:
@@ -121,19 +116,22 @@ OUTPUT RULES:
 """
 
 
-if mode == "hate":
-    prompt = hatePrompt
-else:
-    prompt = glazePrompt
+if __name__ == "__main__":
+    # Get usernames from input
+    github_username = input("Enter GitHub username: ").strip()
+    linkedin_username = input("Enter LinkedIn username: ").strip()
+    mode = input("Choose mode (hate/glaze): ").strip().lower()
+    
+    prompt = HATE_PROMPT if mode == "hate" else GLAZE_PROMPT
 
-# Fetch profiles
-print("\nFetching profiles...")
-github_profile = fetch_github_profile(github_username)
-linkedin_raw = fetch_profile(linkedin_username)
-linkedin_profile = parse_profile(linkedin_raw, linkedin_username)
+    # Fetch profiles
+    print("\nFetching profiles...")
+    github_profile = fetch_github_profile(github_username)
+    linkedin_raw = fetch_profile(linkedin_username)
+    linkedin_profile = parse_profile(linkedin_raw, linkedin_username)
 
-# Create a summary string from the profiles
-github_summary = f"""
+    # Create a summary string from the profiles
+    github_summary = f"""
 GitHub Profile for {github_profile['identity']['username']}:
 - Name: {github_profile['identity']['display_name']}
 - Bio: {github_profile['identity']['bio']}
@@ -144,7 +142,7 @@ GitHub Profile for {github_profile['identity']['username']}:
 - Top Repos: {', '.join([r['name'] for r in github_profile['repositories']['all'][:3]])}
 """
 
-linkedin_summary = f"""
+    linkedin_summary = f"""
 LinkedIn Profile for {linkedin_profile['identity']['name']}:
 - Headline: {linkedin_profile['identity']['headline']}
 - Location: {linkedin_profile['identity']['location']}
@@ -155,7 +153,7 @@ LinkedIn Profile for {linkedin_profile['identity']['name']}:
 - Companies: {', '.join(linkedin_profile['stats']['companies_worked'][:3])}
 """
 
-prompt = f"""{prompt}
+    prompt = f"""{prompt}
 
 {github_summary}
 
@@ -163,38 +161,38 @@ prompt = f"""{prompt}
 
 """
 
-task_instruction = (
-    "Roast this person and be insulting."
-    if mode == "hate"
-    else "Glaze this person and be extremely complimentary."
-)
+    task_instruction = (
+        "Roast this person and be insulting."
+        if mode == "hate"
+        else "Glaze this person and be extremely complimentary."
+    )
 
-llm_prompt = f"{task_instruction}\n\n{prompt}"
+    llm_prompt = f"{task_instruction}\n\n{prompt}"
 
-response_text = generate_with_gemini(llm_prompt)
+    response_text = generate_with_gemini(llm_prompt)
 
-print("\n" + "="*60)
-print(response_text)
-print("="*60)
+    print("\n" + "="*60)
+    print(response_text)
+    print("="*60)
 
-# Text-to-speech via ElevenLabs
-eleven_key = os.getenv("ELEVENLABS_API_KEY")
-if eleven_key:
-    try:
-        eleven = ElevenLabs(api_key=eleven_key)
-        audio = eleven.text_to_speech.convert(
-            text=response_text,
-            voice_id="gE0owC0H9C8SzfDyIUtB",
-            model_id="eleven_flash_v2_5",
-            output_format="mp3_44100_128",
+    # Text-to-speech via ElevenLabs
+    eleven_key = os.getenv("ELEVENLABS_API_KEY")
+    if eleven_key:
+        try:
+            eleven = ElevenLabs(api_key=eleven_key)
+            audio = eleven.text_to_speech.convert(
+                text=response_text,
+                voice_id="gE0owC0H9C8SzfDyIUtB",
+                model_id="eleven_flash_v2_5",
+                output_format="mp3_44100_128",
                 voice_settings=cast(Any, {
                     "stability": 0.5,
                     "similarity_boost": 0.75,
                     "speed": 1,  # 1.0 is normal, go up to 2.0 for fast
                 })
-        )
-        play(audio)
-    except Exception as e:
-        print(f"ElevenLabs TTS failed: {e}")
-else:
-    print("ELEVENLABS_API_KEY not set; skipping text-to-speech playback.")
+            )
+            play(audio)
+        except Exception as e:
+            print(f"ElevenLabs TTS failed: {e}")
+    else:
+        print("ELEVENLABS_API_KEY not set; skipping text-to-speech playback.")
