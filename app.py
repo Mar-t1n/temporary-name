@@ -40,11 +40,17 @@ GESTURE_HOLD_FRAMES = 8
 GESTURE_WINDOW = 12
 GESTURE_COOLDOWN = 1.2
 MISS_TOLERANCE = 10
-MIN_HAND_CONFIDENCE = 0.55
+MIN_HAND_CONFIDENCE = 0.7
 GESTURE_SAMPLE_EVERY = 2
 FACE_SAMPLE_EVERY = 2
 ANALYSIS_MAX_WIDTH = 640
 GUI_TICK_MS = 30
+THUMB_PALM_MIN = 0.055
+THUMB_PINCH_RATIO = 0.30
+THUMB_CURLED_MIN = 3
+AI_IDLE_STATUS = "WAITING FOR SHIFT"
+AI_LOADING_STATUS = "LOADING..."
+AI_SPEAKING_STATUS = "SPEAKING..."
 
 FACE_PRESENCE_WINDOW = 8     # how many recent frames to track for face presence
 FACE_LOSS_GRACE = 6          # frames of "no face" before we actually drop the mesh
@@ -80,14 +86,14 @@ def classify_thumb_gesture(landmarks):
                           landmarks[a].y - landmarks[b].y)
 
     palm = d(0, 9)
-    if palm < 0.04:
+    if palm < THUMB_PALM_MIN:
         return None
-    if d(2, 4) < palm * 0.35:
+    if d(2, 4) < palm * THUMB_PINCH_RATIO:
         return None
 
     curled = sum(1 for pip, tip in [(6, 8), (10, 12), (14, 16), (18, 20)]
                  if d(0, tip) < d(0, pip) * 1.15)
-    if curled < 2:
+    if curled < THUMB_CURLED_MIN:
         return None
 
     dx = landmarks[4].x - landmarks[1].x
@@ -143,7 +149,8 @@ class GestureDetector:
 
         # Two valid thumbs-down at once = super hate
         if orientations.count("down") >= 2:
-            return "super_hate"
+            # Inject extra votes — only need to catch this on a few frames
+            return "super_hate_BOOST"
 
         # Otherwise prefer the strongest single signal
         # (any down beats up beats side, since they're more deliberate)
@@ -170,6 +177,12 @@ class GestureDetector:
 
         if target == current_mode and now - self.last_switch < GESTURE_COOLDOWN:
             return current_mode
+
+        if target == "super_hate_BOOST":
+            target = "super_hate"
+            self.window.extend(["super_hate"] * 3)  # counts as 3 frames
+        else:
+            self.window.append(target)
 
         counts = {m: self.window.count(m) for m in MODE_COLORS}
         winner = max(counts, key=lambda m: counts[m])
@@ -463,6 +476,47 @@ class GlassPill(QWidget):
 
     def set_text(self, text): self.label.setText(text)
     def set_color(self, color): self._color = color; self._refresh()
+
+
+class SpeechCaption(QWidget):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.label = QLabel("")
+        self.label.setWordWrap(True)
+        self.label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        font = QFont("Segoe UI", 24)
+        font.setWeight(QFont.Weight.Black)
+        self.label.setFont(font)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(28, 18, 28, 18)
+        layout.addWidget(self.label)
+        shadow = QGraphicsDropShadowEffect()
+        shadow.setBlurRadius(35); shadow.setColor(QColor(0, 0, 0, 220))
+        shadow.setOffset(0, 5)
+        self.setGraphicsEffect(shadow)
+        self.setStyleSheet("""
+            SpeechCaption {
+                background-color: rgba(0, 0, 0, 190);
+                border: 2px solid rgba(255, 255, 255, 90);
+                border-radius: 24px;
+            }
+        """)
+        self.hide()
+
+    def set_text(self, text):
+        self.label.setText(text)
+        self.label.adjustSize()
+        self.adjustSize()
+        if text:
+            self.show()
+        else:
+            self.hide()
+
+    def set_max_width(self, width):
+        self.label.setMaximumWidth(max(320, width - 56))
+        self.adjustSize()
 
 
 class ProgressRing(QWidget):
@@ -798,6 +852,7 @@ class MainWindow(QMainWindow):
         self._frame_index = 0
         self._last_gesture_target = None
         self._last_analysis = (None, None, None)
+        self._ai_status = AI_IDLE_STATUS
 
         # Face stabilization state
         self.face_history = deque(maxlen=FACE_PRESENCE_WINDOW)
@@ -816,8 +871,10 @@ class MainWindow(QMainWindow):
         self.mode_badge = ModeBadge()
         self.mode_badge.setParent(self.video)
 
-        self.caption_pill = GlassPill(MODE_CAPTIONS["neutral"], MODE_COLORS["neutral"])
+        self.caption_pill = GlassPill(AI_IDLE_STATUS, QColor(160, 160, 170))
         self.caption_pill.setParent(self.video)
+
+        self.speech_caption = SpeechCaption(self.video)
 
         self.progress_ring = ProgressRing()
         self.progress_ring.setParent(self.video)
@@ -880,6 +937,8 @@ class MainWindow(QMainWindow):
                 if self.ai_running:
                     print("[DEBUG:APP] Second Shift press - interrupting audio")
                     ai_core.stop_audio()
+                    self._post_ui(self._set_ai_status, AI_IDLE_STATUS, QColor(160, 160, 170))
+                    self._post_ui(self._set_speech_caption, "")
                     self.ai_running = False
                 else:
                     print("[DEBUG:APP] Left Shift key pressed - triggering AI call")
@@ -922,12 +981,15 @@ class MainWindow(QMainWindow):
 
     def trigger_ai(self):
         print("[DEBUG:AI_TRIGGER] Starting AI trigger sequence")
+        self._post_ui(self._set_ai_status, AI_LOADING_STATUS, QColor(255, 209, 102))
+        self._post_ui(self._set_speech_caption, "")
         # Gather screenshot, face state, and cached profiles, then call AI in background
         b64 = self.analyzer.capture_person_b64()
         if b64:
             print(f"[DEBUG:AI_TRIGGER] Screenshot captured: {len(b64)} chars (base64)")
         else:
             print("[DEBUG:AI_TRIGGER] WARNING: No face detected, skipping AI call")
+            self._post_ui(self._set_ai_status, AI_IDLE_STATUS, QColor(160, 160, 170))
             return
         
         face_state = self.analyzer.get_state()
@@ -965,11 +1027,18 @@ class MainWindow(QMainWindow):
                 else:
                     chosen = "glaze"
                 print(f"[DEBUG:AI_TRIGGER] Calling AI in background thread with mode={chosen}")
-                res = ai_core.call_ai_and_speak(payload, mode=chosen)
+                res = ai_core.call_ai_and_speak(
+                    payload,
+                    mode=chosen,
+                    status_callback=lambda state, text, color: self._post_ui(self._set_ai_status, text, QColor(color) if not isinstance(color, QColor) else color),
+                    caption_callback=lambda text: self._post_ui(self._set_speech_caption, text),
+                )
                 print(f"[DEBUG:AI_TRIGGER] AI response received: {len(res)} chars")
                 print(f"[DEBUG:AI_TRIGGER] Response text: {res[:100]}...")
             finally:
                 self.ai_running = False
+                self._post_ui(self._set_ai_status, AI_IDLE_STATUS, QColor(160, 160, 170))
+                self._post_ui(self._set_speech_caption, "")
                 print("[DEBUG:AI_TRIGGER] AI call complete, resetting flag")
 
         print("[DEBUG:AI_TRIGGER] Spawning background thread")
@@ -981,6 +1050,17 @@ class MainWindow(QMainWindow):
     def resizeEvent(self, e):
         super().resizeEvent(e)
         self._reposition()
+
+    def _post_ui(self, func, *args, **kwargs):
+        QTimer.singleShot(0, lambda: func(*args, **kwargs))
+
+    def _set_ai_status(self, text, color):
+        self._ai_status = text
+        self.caption_pill.set_text(text)
+        self.caption_pill.set_color(color)
+
+    def _set_speech_caption(self, text):
+        self.speech_caption.set_text(text)
 
     def _reposition(self):
         w, h = self.video.width(), self.video.height()
@@ -995,6 +1075,11 @@ class MainWindow(QMainWindow):
         self.caption_pill.adjustSize()
         self.caption_pill.move((w - self.caption_pill.width()) // 2,
                                h - self.caption_pill.height() - margin - 8)
+
+        self.speech_caption.set_max_width(w - 2 * margin)
+        self.speech_caption.adjustSize()
+        self.speech_caption.move((w - self.speech_caption.width()) // 2,
+                                 margin + 10)
 
         self.profile_panel.move(w - self.profile_panel.width() - margin,
                                 h - self.profile_panel.height() - margin)
@@ -1034,8 +1119,6 @@ class MainWindow(QMainWindow):
                 self.mode = new_mode
                 self.analyzer.set_mode(self.mode)
                 self.mode_badge.set_mode(self.mode, MODE_COLORS[self.mode])
-                self.caption_pill.set_text(MODE_CAPTIONS[self.mode])
-                self.caption_pill.set_color(MODE_COLORS[self.mode])
                 self.flash.trigger(self.mode, MODE_COLORS[self.mode])
 
         h, w = frame.shape[:2]

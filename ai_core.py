@@ -2,15 +2,21 @@ import os
 import json
 import threading
 import time
+import io
+import tempfile
+import subprocess
+import wave
 from typing import Optional, Dict, Any
 from pathlib import Path
+from collections.abc import Iterable
 
+import numpy as np
+import sounddevice as sd
 from elevenlabs.client import ElevenLabs
-from elevenlabs.play import play
 
 from githubinfo import fetch_github_profile
 from linkedin_profile import fetch_profile, parse_profile
-from mainAI import generate_with_gemini
+from mainAI import generate_with_gemini as generate_response
 
 CACHE_PATH = Path("profiles_cache.json")
 CAPTURED_VIDEOS_DIR = Path("captured-videos")
@@ -24,18 +30,20 @@ _cache_lock = threading.Lock()
 
 # Global audio control for interruption on second Shift press
 _current_audio_thread = None
+_audio_stop_event = threading.Event()
 _audio_lock = threading.Lock()
 
 def stop_audio():
     """Stop the currently playing audio if any."""
     global _current_audio_thread
     with _audio_lock:
+        _audio_stop_event.set()
+        try:
+            sd.stop()
+        except Exception as e:
+            print(f"[DEBUG:AI] Audio stop failed: {e}")
         if _current_audio_thread:
-            try:
-                _current_audio_thread.terminate()
-                print("[DEBUG:AI] Audio interrupted by user")
-            except Exception as e:
-                print(f"[DEBUG:AI] Audio interrupt failed: {e}")
+            print("[DEBUG:AI] Audio interrupted by user")
             _current_audio_thread = None
 
 def set_audio_thread(thread):
@@ -43,6 +51,126 @@ def set_audio_thread(thread):
     global _current_audio_thread
     with _audio_lock:
         _current_audio_thread = thread
+
+
+def _coerce_audio_bytes(audio_data) -> bytes:
+    if audio_data is None:
+        return b""
+    if isinstance(audio_data, (bytes, bytearray)):
+        return bytes(audio_data)
+    if hasattr(audio_data, "read"):
+        return audio_data.read()
+    if isinstance(audio_data, Iterable):
+        chunks = []
+        for chunk in audio_data:
+            if isinstance(chunk, (bytes, bytearray)):
+                chunks.append(bytes(chunk))
+        if chunks:
+            return b"".join(chunks)
+    return b""
+
+
+def _split_for_speech(text: str, max_words: int = 10):
+    words = text.split()
+    if not words:
+        return []
+
+    chunks = []
+    current = []
+    for word in words:
+        current.append(word)
+        if len(current) >= max_words or word.endswith((".", "!", "?")):
+            chunks.append(" ".join(current).strip())
+            current = []
+    if current:
+        chunks.append(" ".join(current).strip())
+    return [chunk for chunk in chunks if chunk]
+
+
+def _play_mp3_audio(audio_data):
+    """Play MP3 audio using pydub, ffmpeg, or sounddevice."""
+    audio_bytes = _coerce_audio_bytes(audio_data)
+    if not audio_bytes:
+        return
+    
+    try:
+        # Try pydub first - reload module in case it was just installed
+        import importlib
+        import sys
+        if 'pydub' in sys.modules:
+            importlib.reload(sys.modules['pydub'])
+        
+        from pydub import AudioSegment
+        from pydub.playback import play
+        print("[DEBUG:AI] Using pydub to play MP3")
+        audio = AudioSegment.from_mp3(io.BytesIO(audio_bytes))
+        play(audio)
+        return
+    except (ImportError, Exception) as e:
+        print(f"[DEBUG:AI] pydub failed ({type(e).__name__}), trying ffmpeg")
+    
+    # Fallback: Use ffmpeg to decode MP3
+    try:
+        import wave
+        
+        # Create temp files and CLOSE them before ffmpeg accesses them (Windows file locking fix)
+        mp3_tmp = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
+        mp3_tmp.write(audio_bytes)
+        mp3_tmp.close()  # Close immediately so ffmpeg can access
+        mp3_path = mp3_tmp.name
+        
+        wav_tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+        wav_path = wav_tmp.name
+        wav_tmp.close()  # Close before ffmpeg writes to it
+        
+        try:
+            # Convert MP3 to WAV using ffmpeg
+            result = subprocess.run(
+                ["ffmpeg", "-i", mp3_path, "-acodec", "pcm_s16le", "-ar", "44100", "-ac", "2", "-y", wav_path],
+                capture_output=True,
+                timeout=30
+            )
+            
+            if result.returncode == 0:
+                # Read and play WAV file
+                try:
+                    with wave.open(wav_path, 'rb') as wav_file:
+                        frames = wav_file.readframes(wav_file.getnframes())
+                        sample_rate = wav_file.getframerate()
+                        audio_array = np.frombuffer(frames, dtype=np.int16)
+                        sd.play(audio_array, sample_rate)
+                        sd.wait()
+                        print("[DEBUG:AI] MP3 played via ffmpeg conversion")
+                finally:
+                    try:
+                        os.remove(wav_path)
+                    except:
+                        pass
+            else:
+                err_msg = result.stderr.decode() if result.stderr else "Unknown error"
+                print(f"[DEBUG:AI] ffmpeg conversion failed: {err_msg}")
+        finally:
+            try:
+                os.remove(mp3_path)
+            except:
+                pass
+                
+    except FileNotFoundError:
+        print("[DEBUG:AI] ffmpeg not found - install ffmpeg to enable audio playback")
+    except Exception as e:
+        print(f"[DEBUG:AI] MP3 playback failed: {e}")
+
+
+def _play_pcm_audio(audio_data, sample_rate: int = 44100):
+    pcm_bytes = _coerce_audio_bytes(audio_data)
+    if not pcm_bytes:
+        return
+    pcm = np.frombuffer(pcm_bytes, dtype=np.int16)
+    if pcm.size == 0:
+        return
+    sd.play(pcm, sample_rate)
+    sd.wait()
+
 
 def _load_cache() -> Dict[str, Any]:
     with _cache_lock:
@@ -219,10 +347,16 @@ def build_payload(image_b64: Optional[str], face_state: Dict[str, Any], github_k
     return payload
 
 
-def call_ai_and_speak(payload: Dict[str, Any], mode: str = "glaze") -> str:
+def call_ai_and_speak(payload: Dict[str, Any], mode: str = "glaze", status_callback=None, caption_callback=None) -> str:
     print(f"[DEBUG:AI] Starting AI call with mode: {mode}")
+    _audio_stop_event.clear()
     system_prompt = SYSTEM_PROMPTS.get(mode, SYSTEM_PROMPTS["glaze"])
     print(f"[DEBUG:AI] System prompt selected ({len(system_prompt)} chars)")
+    if status_callback:
+        try:
+            status_callback("loading", "LOADING...", "#ffd166")
+        except Exception as e:
+            print(f"[DEBUG:AI] Status callback failed: {e}")
 
     # Assemble a plain text prompt including key facts
     pieces = [system_prompt, "\n\n=== USER DATA ===\n"]
@@ -272,8 +406,8 @@ def call_ai_and_speak(payload: Dict[str, Any], mode: str = "glaze") -> str:
 
     # Call LLM
     try:
-        print(f"[DEBUG:AI] Calling Gemini LLM...")
-        response = generate_with_gemini(prompt_text)
+        print(f"[DEBUG:AI] Calling Grok LLM...")
+        response = generate_response(prompt_text)
         print(f"[DEBUG:AI] LLM response received ({len(response)} chars)")
     except Exception as e:
         print(f"[DEBUG:AI] LLM call FAILED: {e}")
@@ -285,24 +419,58 @@ def call_ai_and_speak(payload: Dict[str, Any], mode: str = "glaze") -> str:
         if eleven_key:
             print(f"[DEBUG:AI] ElevenLabs API key found, calling TTS...")
             eleven = ElevenLabs(api_key=eleven_key)
-            audio = eleven.text_to_speech.convert(
-                text=response,
-                voice_id="gE0owC0H9C8SzfDyIUtB",
-                model_id="eleven_flash_v2_5",
-                output_format="mp3_44100_128",
-                voice_settings={
-                    "stability": 0.5,
-                    "similarity_boost": 0.75,
-                    "speed": 1,
-                }
-            )
-            print(f"[DEBUG:AI] TTS audio generated, playing...")
-            play(audio)
+            chunks = _split_for_speech(response, max_words=10)
+            if not chunks:
+                chunks = [response]
+
+            if status_callback:
+                try:
+                    status_callback("speaking", "SPEAKING...", "#7ae582")
+                except Exception as e:
+                    print(f"[DEBUG:AI] Status callback failed: {e}")
+
+            for chunk in chunks:
+                if _audio_stop_event.is_set():
+                    print("[DEBUG:AI] Speech stopped before next caption chunk")
+                    break
+                if caption_callback:
+                    try:
+                        caption_callback(chunk)
+                    except Exception as e:
+                        print(f"[DEBUG:AI] Caption callback failed: {e}")
+                audio = eleven.text_to_speech.convert(
+                    text=chunk,
+                    voice_id="gE0owC0H9C8SzfDyIUtB",
+                    model_id="eleven_flash_v2_5",
+                    output_format="mp3_44100_128",
+                    voice_settings={
+                        "stability": 0.5,
+                        "similarity_boost": 0.75,
+                        "speed": 1,
+                    }
+                )
+                print(f"[DEBUG:AI] TTS audio generated for chunk: {chunk[:40]!r}")
+                _play_mp3_audio(audio)
+                if _audio_stop_event.is_set():
+                    print("[DEBUG:AI] Speech interrupted during playback")
+                    break
+
+            if caption_callback and not _audio_stop_event.is_set():
+                try:
+                    caption_callback("")
+                except Exception as e:
+                    print(f"[DEBUG:AI] Caption clear callback failed: {e}")
             print(f"[DEBUG:AI] Audio playback started")
         else:
             print(f"[DEBUG:AI] No ElevenLabs API key - skipping TTS")
     except Exception as e:
         print(f"[DEBUG:AI] TTS/playback failed: {e}")
+
+    if status_callback:
+        try:
+            status_callback("ready", "WAITING FOR SHIFT", "#9aa0aa")
+        except Exception as e:
+            print(f"[DEBUG:AI] Status reset callback failed: {e}")
 
     print(f"[DEBUG:AI] AI call complete")
     return response

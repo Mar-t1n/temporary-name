@@ -27,13 +27,15 @@
       "public_repos": 4,
       "public_gists": 0,
       "followers": 0,
-      "following": 0
+      "following": 1
     },
     "social": {
       "followers": [],
-      "following": [],
+      "following": [
+        "matthew-weinstein"
+      ],
       "follower_count": 0,
-      "following_count": 0,
+      "following_count": 1,
       "follow_ratio": 0.0,
       "organizations": []
     },
@@ -106,10 +108,10 @@
           "topics": [],
           "url": "https://github.com/Mar-t1n/temporary-name",
           "created_at": "2026-05-02T02:43:00Z",
-          "updated_at": "2026-05-02T16:39:22Z",
-          "pushed_at": "2026-05-02T16:39:18Z",
+          "updated_at": "2026-05-02T18:49:42Z",
+          "pushed_at": "2026-05-02T18:49:38Z",
           "license": null,
-          "size_kb": 9889
+          "size_kb": 9913
         }
       ],
       "original": [
@@ -180,10 +182,10 @@
           "topics": [],
           "url": "https://github.com/Mar-t1n/temporary-name",
           "created_at": "2026-05-02T02:43:00Z",
-          "updated_at": "2026-05-02T16:39:22Z",
-          "pushed_at": "2026-05-02T16:39:18Z",
+          "updated_at": "2026-05-02T18:49:42Z",
+          "pushed_at": "2026-05-02T18:49:38Z",
           "license": null,
-          "size_kb": 9889
+          "size_kb": 9913
         }
       ],
       "forked": [],
@@ -361,7 +363,7 @@
       "companies_worked": [],
       "schools_attended": []
     },
-    "scraped_at": "2026-05-02T17:43:28.232383"
+    "scraped_at": "2026-05-02T19:31:36.307084"
   },
   "github::mar-t1n": {
     "identity": {
@@ -1007,5 +1009,421 @@
         }
       ]
     }
+  },
+  "github::matthew-weinstein": {
+    "identity": {
+      "username": "matthew-weinstein",
+      "display_name": "Matthew Weinstein",
+      "bio": null,
+      "company": null,
+      "location": null,
+      "email": null,
+      "website": "",
+      "twitter": null,
+      "hireable": null,
+      "profile_url": "https://github.com/matthew-weinstein",
+      "avatar_url": "https://avatars.githubusercontent.com/u/192227923?v=4"
+    },
+    "account_stats": {
+      "created_at": "2024-12-19T14:06:09Z",
+      "account_age_days": 499,
+      "updated_at": "2026-05-02T00:44:36Z",
+      "public_repos": 5,
+      "public_gists": 0,
+      "followers": 2,
+      "following": 0
+    },
+    "social": {
+      "followers": [
+        "Aryamanee",
+        "Mar-t1n"
+      ],
+      "following": [],
+      "follower_count": 2,
+      "following_count": 0,
+      "follow_ratio": 2.0,
+      "organizations": []
+    },
+    "repositories": {
+      "all": [
+        {
+          "name": "glassmorph-lab",
+          "description": null,
+          "language": "TypeScript",
+          "stars": 1,
+          "forks": 0,
+          "watchers": 1,
+          "open_issues": 0,
+          "is_fork": false,
+          "is_archived": false,
+          "topics": [],
+          "url": "https://github.com/matthew-weinstein/glassmorph-lab",
+          "created_at": "2025-04-15T01:58:18Z",
+          "updated_at": "2025-05-06T00:32:35Z",
+          "pushed_at": "2025-05-06T00:35:39Z",
+          "license": null,
+          "size_kb": 14710
+        },
+        {
+          "name": "smartcart",
+          "description": null,
+          "language": "TypeScript",
+          "stars": 1,
+          "forks": 0,
+          "watchers": 1,
+          "open_issues": 0,
+          "is_fork": false,
+          "is_archived": false,
+          "topics": [],
+          "url": "https://github.com/matthew-weinstein/smartcart",
+          "created_at": "2025-05-17T03:26:12Z",
+          "updated_at": "2025-05-18T12:30:02Z",
+          "pushed_at": "2025-05-18T12:29:59Z",
+          "license": null,
+          "size_kb": 588
+        },
+        {
+          "name": "ACE-Attention-and-Cognitive-Evaluation",
+          "description": null,
+          "language": "JavaScript",
+          "stars": 0,
+          "forks": 0,
+          "watchers": 0,
+          "open_issues": 1,
+          "is_fork": false,
+          "is_archived": false,
+          "topics": [],
+          "url": "https://github.com/matthew-weinstein/ACE-Attention-and-Cognitive-Evaluation",
+          "created_at": "2025-10-25T22:25:25Z",
+          "updated_at": "2025-10-26T12:10:25Z",
+          "pushed_at": "2025-10-26T12:10:20Z",
+          "license": null,
+          "size_kb": 820
+        },
+        {
+          "name": "CMR",
+          "description": "Expediting and streamlining Medical",
+          "language": null,
+          "stars": 0,
+          "forks": 0,
+          "watchers": 0,
+          "open_issues": 0,
+          "is_fork": false,
+          "is_archived": false,
+          "topics": [],
+          "url": "https://github.com/matthew-weinstein/CMR",
+          "created_at": "2026-03-07T14:35:25Z",
+          "updated_at": "2026-03-07T14:35:25Z",
+          "pushed_at": "2026-03-07T14:37:33Z",
+          "license": null,
+          "size_kb": 602
+        },
+        {
+          "name": "PeerTutor",
+          "description": null,
+          "language": "JavaScript",
+          "stars": 0,
+          "forks": 0,
+          "watchers": 0,
+          "open_issues": 0,
+          "is_fork": false,
+          "is_archived": false,
+          "topics": [],
+          "url": "https://github.com/matthew-weinstein/PeerTutor",
+          "created_at": "2025-04-07T21:32:24Z",
+          "updated_at": "2026-02-20T22:37:58Z",
+          "pushed_at": "2025-04-08T20:48:33Z",
+          "license": null,
+          "size_kb": 6982
+        }
+      ],
+      "original": [
+        {
+          "name": "glassmorph-lab",
+          "description": null,
+          "language": "TypeScript",
+          "stars": 1,
+          "forks": 0,
+          "watchers": 1,
+          "open_issues": 0,
+          "is_fork": false,
+          "is_archived": false,
+          "topics": [],
+          "url": "https://github.com/matthew-weinstein/glassmorph-lab",
+          "created_at": "2025-04-15T01:58:18Z",
+          "updated_at": "2025-05-06T00:32:35Z",
+          "pushed_at": "2025-05-06T00:35:39Z",
+          "license": null,
+          "size_kb": 14710
+        },
+        {
+          "name": "smartcart",
+          "description": null,
+          "language": "TypeScript",
+          "stars": 1,
+          "forks": 0,
+          "watchers": 1,
+          "open_issues": 0,
+          "is_fork": false,
+          "is_archived": false,
+          "topics": [],
+          "url": "https://github.com/matthew-weinstein/smartcart",
+          "created_at": "2025-05-17T03:26:12Z",
+          "updated_at": "2025-05-18T12:30:02Z",
+          "pushed_at": "2025-05-18T12:29:59Z",
+          "license": null,
+          "size_kb": 588
+        },
+        {
+          "name": "ACE-Attention-and-Cognitive-Evaluation",
+          "description": null,
+          "language": "JavaScript",
+          "stars": 0,
+          "forks": 0,
+          "watchers": 0,
+          "open_issues": 1,
+          "is_fork": false,
+          "is_archived": false,
+          "topics": [],
+          "url": "https://github.com/matthew-weinstein/ACE-Attention-and-Cognitive-Evaluation",
+          "created_at": "2025-10-25T22:25:25Z",
+          "updated_at": "2025-10-26T12:10:25Z",
+          "pushed_at": "2025-10-26T12:10:20Z",
+          "license": null,
+          "size_kb": 820
+        },
+        {
+          "name": "CMR",
+          "description": "Expediting and streamlining Medical",
+          "language": null,
+          "stars": 0,
+          "forks": 0,
+          "watchers": 0,
+          "open_issues": 0,
+          "is_fork": false,
+          "is_archived": false,
+          "topics": [],
+          "url": "https://github.com/matthew-weinstein/CMR",
+          "created_at": "2026-03-07T14:35:25Z",
+          "updated_at": "2026-03-07T14:35:25Z",
+          "pushed_at": "2026-03-07T14:37:33Z",
+          "license": null,
+          "size_kb": 602
+        },
+        {
+          "name": "PeerTutor",
+          "description": null,
+          "language": "JavaScript",
+          "stars": 0,
+          "forks": 0,
+          "watchers": 0,
+          "open_issues": 0,
+          "is_fork": false,
+          "is_archived": false,
+          "topics": [],
+          "url": "https://github.com/matthew-weinstein/PeerTutor",
+          "created_at": "2025-04-07T21:32:24Z",
+          "updated_at": "2026-02-20T22:37:58Z",
+          "pushed_at": "2025-04-08T20:48:33Z",
+          "license": null,
+          "size_kb": 6982
+        }
+      ],
+      "forked": [],
+      "archived": [],
+      "total_stars_earned": 2,
+      "total_forks_earned": 0,
+      "top_languages": [
+        [
+          "TypeScript",
+          2
+        ],
+        [
+          "JavaScript",
+          2
+        ]
+      ]
+    },
+    "starred": [
+      {
+        "name": "matthew-weinstein/glassmorph-lab",
+        "description": null,
+        "language": "TypeScript",
+        "stars": 1
+      }
+    ],
+    "activity": {
+      "event_type_summary": {
+        "PushEvent": 9,
+        "CreateEvent": 1,
+        "MemberEvent": 1
+      },
+      "recent_events": [
+        {
+          "type": "PushEvent",
+          "repo": "Mar-t1n/temporary-name",
+          "date": "2026-05-02T18:49:38Z",
+          "commit_messages": []
+        },
+        {
+          "type": "PushEvent",
+          "repo": "Mar-t1n/temporary-name",
+          "date": "2026-05-02T16:39:19Z",
+          "commit_messages": []
+        },
+        {
+          "type": "PushEvent",
+          "repo": "Mar-t1n/temporary-name",
+          "date": "2026-05-02T15:11:59Z",
+          "commit_messages": []
+        },
+        {
+          "type": "PushEvent",
+          "repo": "Mar-t1n/temporary-name",
+          "date": "2026-05-02T13:42:52Z",
+          "commit_messages": []
+        },
+        {
+          "type": "PushEvent",
+          "repo": "Mar-t1n/temporary-name",
+          "date": "2026-05-02T13:32:01Z",
+          "commit_messages": []
+        },
+        {
+          "type": "PushEvent",
+          "repo": "Mar-t1n/temporary-name",
+          "date": "2026-05-02T12:53:15Z",
+          "commit_messages": []
+        },
+        {
+          "type": "PushEvent",
+          "repo": "Mar-t1n/temporary-name",
+          "date": "2026-05-02T07:00:25Z",
+          "commit_messages": []
+        },
+        {
+          "type": "PushEvent",
+          "repo": "Mar-t1n/temporary-name",
+          "date": "2026-05-02T06:44:10Z",
+          "commit_messages": []
+        },
+        {
+          "type": "PushEvent",
+          "repo": "Mar-t1n/temporary-name",
+          "date": "2026-05-02T06:32:01Z",
+          "commit_messages": []
+        },
+        {
+          "type": "CreateEvent",
+          "repo": "Mar-t1n/temporary-name",
+          "date": "2026-05-02T05:55:28Z"
+        },
+        {
+          "type": "MemberEvent",
+          "repo": "Mar-t1n/temporary-name",
+          "date": "2026-05-02T02:48:01Z"
+        }
+      ]
+    }
+  },
+  "linkedin::matthew-weinstein1": {
+    "identity": {
+      "name": "Matthew Weinstein",
+      "headline": null,
+      "location": "Vaughan, Ontario, Canada",
+      "about": null,
+      "connections": 75,
+      "followers": 75,
+      "website": null,
+      "profile_url": "https://ca.linkedin.com/in/matthew-weinstein1"
+    },
+    "current_role": "No-company. (Self-employed.)",
+    "current_education": "Westmount Collegiate Institute",
+    "experiences": [
+      {
+        "title": null,
+        "company": "No-company. (Self-employed.)",
+        "from_date": null,
+        "to_date": null,
+        "description": null,
+        "location": "Vaughan, ON"
+      },
+      {
+        "title": null,
+        "company": null,
+        "from_date": null,
+        "to_date": null,
+        "description": null,
+        "location": "Vaughan, ON"
+      },
+      {
+        "title": null,
+        "company": null,
+        "from_date": null,
+        "to_date": null,
+        "description": null,
+        "location": "Vaughan, ON"
+      }
+    ],
+    "educations": [
+      {
+        "institution": "Westmount Collegiate Institute",
+        "degree": null,
+        "field": null,
+        "from_date": "2022-09-02 00:00:00",
+        "to_date": "2026-06-02 00:00:00",
+        "description": null
+      }
+    ],
+    "projects": [
+      {
+        "title": "Low-Power Sleep Monitor",
+        "from_date": "2026-02-02 00:00:00",
+        "to_date": null,
+        "description": "A bedside ESP32-S3 embedded device that detects and records audio events during 8+ hours of sleep using threshold-triggered audio recording with a pre-trigger buffer for low-power operation. Automatically uploads recordings to cloud storage via WiFi each morning, to analyze patterns such as sleep disruptions and breathing irregularities.",
+        "url": null
+      },
+      {
+        "title": "Medy-Scan",
+        "from_date": "2026-03-02 00:00:00",
+        "to_date": "2026-03-02 00:00:00",
+        "description": "A personal health record system that scans medical documents, extracts key information, and explains results in plain language to improve health literacy for Canadians. Identifies potential medication conflicts, predicts health risks based on medical history, and organizes records into a chronological timeline. Medy-Scan addresses the fact that nearly 90% of Canadian adults over 65 struggle to understand basic health information.",
+        "url": null
+      },
+      {
+        "title": "8\u00d78 RGB LED Matrix - Custom PCB Arduino Driver + Pong",
+        "from_date": "2025-10-02 00:00:00",
+        "to_date": "2025-11-02 00:00:00",
+        "description": "A custom PCB featuring shift-register logic and hand-routed traces within a 100 cm\u00b2 constraint. The board runs a fully functional C++ Pong game with multiplexed LED control.",
+        "url": null
+      },
+      {
+        "title": "ACE - Attention Cognitive Evaluation",
+        "from_date": "2025-10-02 00:00:00",
+        "to_date": "2025-11-02 00:00:00",
+        "description": "An Electron-based medical tool that captures eye-tracking and head motion patterns through interactive mini-games to generate quantifiable biomarker data for neurocognitive assessments. The application aims to use objective metrics to support early diagnosis for the roughly 1 in 6 children facing neurodevelopmental challenges.",
+        "url": null
+      }
+    ],
+    "certifications": [
+      {
+        "authority": "Standard First Aid and CPR-C",
+        "from_date": "2024-04-02 00:00:00",
+        "to_date": "2027-04-02 00:00:00"
+      }
+    ],
+    "skills": [],
+    "stats": {
+      "total_jobs": 3,
+      "total_schools": 1,
+      "total_projects": 4,
+      "companies_worked": [
+        "No-company. (Self-employed.)"
+      ],
+      "schools_attended": [
+        "Westmount Collegiate Institute"
+      ]
+    },
+    "scraped_at": "2026-05-02T19:10:10.042996"
   }
 }

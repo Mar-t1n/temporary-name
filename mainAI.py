@@ -11,57 +11,48 @@ from linkedin_profile import fetch_profile, parse_profile
 load_dotenv(dotenv_path=".env")
 
 def generate_with_gemini(prompt_text: str) -> str:
-    """Generate a single text response using Gemini via REST API."""
-    api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    """Generate a single text response using Grok API via REST API."""
+    api_key = os.getenv("GROK_API_KEY")
     if not api_key:
-        raise ValueError("GEMINI_API_KEY (or GOOGLE_API_KEY) is not set.")
+        raise ValueError("GROK_API_KEY is not set. Get your key from https://console.x.ai")
 
     payload = {
-        "contents": [
+        "messages": [
             {
-                "parts": [
-                    {
-                        "text": prompt_text,
-                    }
-                ]
+                "role": "user",
+                "content": prompt_text,
             }
-        ]
+        ],
+        "model": "grok-4-1-fast-reasoning",
+        "stream": False,
     }
 
-    models_to_try = ["gemini-2.0-flash", "gemini-2.5-flash", "gemini-flash-latest"]
-    errors = []
+    url = "https://api.x.ai/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
 
-    for model_name in models_to_try:
-        url = (
-            "https://generativelanguage.googleapis.com/v1beta/"
-            f"models/{model_name}:generateContent?key={api_key}"
-        )
+    response = requests.post(url, json=payload, headers=headers, timeout=30)
+    if response.status_code >= 400:
+        body_preview = response.text[:300]
+        if "invalid" in body_preview.lower() or "unauthorized" in body_preview.lower():
+            raise RuntimeError(
+                "Grok API key is invalid or expired. Get a fresh key from https://console.x.ai and update GROK_API_KEY in .env."
+            )
+        raise RuntimeError(f"Grok request failed: HTTP {response.status_code} - {body_preview}")
 
-        response = requests.post(url, json=payload, timeout=30)
-        if response.status_code >= 400:
-            body_preview = response.text[:300]
-            if "API key expired" in body_preview:
-                raise RuntimeError(
-                    "Gemini API key is expired. Generate a fresh key in Google AI Studio and update GEMINI_API_KEY in .env."
-                )
-            errors.append(f"{model_name}: HTTP {response.status_code} - {body_preview}")
-            continue
+    data = response.json()
+    choices = data.get("choices", [])
+    if not choices:
+        raise RuntimeError("Grok returned no choices")
 
-        data = response.json()
-        candidates = data.get("candidates", [])
-        if not candidates:
-            errors.append(f"{model_name}: no candidates returned")
-            continue
+    message = choices[0].get("message", {})
+    text = message.get("content", "").strip()
+    if not text:
+        raise RuntimeError("Grok returned empty response text")
 
-        parts = candidates[0].get("content", {}).get("parts", [])
-        text_chunks = [p.get("text", "") for p in parts if p.get("text")]
-        if not text_chunks:
-            errors.append(f"{model_name}: empty response text")
-            continue
-
-        return "\n".join(text_chunks).strip()
-
-    raise RuntimeError("Gemini request failed. " + " | ".join(errors))
+    return text
 
 
 # System prompts for different modes
