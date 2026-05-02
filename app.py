@@ -95,14 +95,19 @@ def classify_thumb_gesture(landmarks):
     if curled_count < 3:  # allow one finger to be sloppy
         return None
 
-    # 3) Classify thumb direction
+# 3) Classify thumb direction — biased toward "side" since it's harder to hold cleanly
     dx = x(thumb_tip) - x(thumb_mcp)
     dy = y(thumb_tip) - y(thumb_mcp)
 
-    if abs(dy) > abs(dx) * 1.4:
-        return "down" if dy > 0 else "up"
-    if abs(dx) > abs(dy) * 1.2:
+    abs_dx, abs_dy = abs(dx), abs(dy)
+
+    # If horizontal component is at least 60% of vertical, call it side.
+    # This makes neutral much easier to trigger.
+    if abs_dx > abs_dy * 0.6:
         return "side"
+    # Otherwise it's clearly vertical
+    if abs_dy > abs_dx * 1.5:
+        return "down" if dy > 0 else "up"
     return None
 
 
@@ -533,6 +538,76 @@ class GlassPill(QWidget):
         self.label.setText(text)
 
 
+class TransitionFlash(QWidget):
+    """Full-screen flash + mode-name burst when switching modes."""
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.alpha = 0.0
+        self.text = ""
+        self.color = QColor(0, 255, 220)
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._step)
+
+    def trigger(self, mode_name, color: QColor):
+        self.text = mode_name.upper()
+        self.color = color
+        self.alpha = 1.0
+        parent_widget = self.parentWidget()
+        if parent_widget is not None:
+            self.resize(parent_widget.size())
+        self.raise_()
+        self.show()
+        self._timer.start(16)
+
+    def _step(self):
+        self.alpha -= 0.04
+        if self.alpha <= 0:
+            self.alpha = 0
+            self.hide()
+            self._timer.stop()
+        self.update()
+
+    def paintEvent(self, e):
+        if self.alpha <= 0:
+            return
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        w, h = self.width(), self.height()
+
+        # Vignette flash — colored radial gradient pulse
+        grad = QRadialGradient(w / 2, h / 2, max(w, h) * 0.7)
+        c1 = QColor(self.color); c1.setAlpha(int(60 * self.alpha))
+        c2 = QColor(self.color); c2.setAlpha(0)
+        grad.setColorAt(0, c2)
+        grad.setColorAt(0.7, c2)
+        grad.setColorAt(1, c1)
+        p.fillRect(self.rect(), QBrush(grad))
+
+        # Border glow on all four edges
+        border_alpha = int(220 * self.alpha)
+        edge_color = QColor(self.color); edge_color.setAlpha(border_alpha)
+        thickness = int(8 * self.alpha) + 2
+        p.fillRect(0, 0, w, thickness, edge_color)
+        p.fillRect(0, h - thickness, w, thickness, edge_color)
+        p.fillRect(0, 0, thickness, h, edge_color)
+        p.fillRect(w - thickness, 0, thickness, h, edge_color)
+
+        # Big mode name in the center, scaling as it fades
+        scale = 1.0 + (1.0 - self.alpha) * 0.4   # grows as it fades
+        font = QFont("Segoe UI", int(72 * scale))
+        font.setWeight(QFont.Weight.Black)
+        font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 8)
+        p.setFont(font)
+
+        text_color = QColor(self.color); text_color.setAlpha(int(255 * self.alpha))
+        p.setPen(QPen(text_color))
+        rect = QRectF(0, 0, w, h)
+        p.drawText(rect, Qt.AlignmentFlag.AlignCenter, self.text)
+        
+
 class ModeBadge(QWidget):
     """Top-left mode label."""
     def __init__(self):
@@ -641,6 +716,7 @@ class MainWindow(QMainWindow):
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
 
         self.mode = "neutral"
+        self.mesh_enabled = True
 
         # Central video widget
         self.video = VideoWidget()
@@ -661,8 +737,10 @@ class MainWindow(QMainWindow):
 
         self.progress_ring = ProgressRing()
         self.progress_ring.setParent(self.video)
+        
+        self.flash = TransitionFlash(self.video)
 
-        self.hint = QLabel("click to cycle face   ·   space to capture   ·   esc to quit")
+        self.hint = QLabel("click: cycle face   ·   space: capture   ·   m: toggle mesh   ·   esc: quit")
         self.hint.setParent(self.video)
         self.hint.setStyleSheet("color: rgba(160,160,170,180); background: transparent;")
         font = QFont("Segoe UI", 9)
@@ -679,6 +757,8 @@ class MainWindow(QMainWindow):
     def keyPressEvent(self, e):
         if e.key() == Qt.Key.Key_Escape or e.key() == Qt.Key.Key_Q:
             self.close()
+        elif e.key() == Qt.Key.Key_M:
+            self.mesh_enabled = not self.mesh_enabled
         elif e.key() == Qt.Key.Key_Space:
             self.analyzer.capture()
             # Brief flash animation could go here
@@ -709,37 +789,43 @@ class MainWindow(QMainWindow):
         self.hint.move(w - self.hint.width() - 24, h - self.hint.height() - 16)
 
     def tick(self):
-        ok, frame = self.cap.read()
-        if not ok:
-            return
-        frame = cv2.flip(frame, 1)
+            ok, frame = self.cap.read()
+            if not ok:
+                return
+            frame = cv2.flip(frame, 1)
 
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        target = self.gestures.detect(rgb)
-        new_mode = self.gestures.update_mode(self.mode, target)
-        if new_mode != self.mode:
-            self.mode = new_mode
-            self.analyzer.set_mode(self.mode)
-            self.mode_badge.set_mode(self.mode, MODE_COLORS[self.mode])
-            self.caption_pill.set_text(MODE_CAPTIONS[self.mode])
-            self.caption_pill.set_color(MODE_COLORS[self.mode])
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            target = self.gestures.detect(rgb)
+            new_mode = self.gestures.update_mode(self.mode, target)
+            if new_mode != self.mode:
+                self.mode = new_mode
+                self.analyzer.set_mode(self.mode)
+                self.mode_badge.set_mode(self.mode, MODE_COLORS[self.mode])
+                self.caption_pill.set_text(MODE_CAPTIONS[self.mode])
+                self.caption_pill.set_color(MODE_COLORS[self.mode])
+                self.flash.trigger(self.mode, MODE_COLORS[self.mode])
 
-        h, w = frame.shape[:2]
-        landmarks_pts, landmarks_raw, metrics = self._analyze_face(frame, w, h)
-        self.video.update_frame(frame, landmarks_pts, landmarks_raw, metrics, self.mode)
+            h, w = frame.shape[:2]
+            landmarks_pts, landmarks_raw, metrics = self._analyze_face(frame, w, h)
 
-        state = self.analyzer.get_state()
-        emo = state["emotion"]
-        if emo and emo != "neutral":
-            self.emotion_pill.set_text(emo.upper())
-            self.emotion_pill.show()
-        else:
-            self.emotion_pill.hide()
+            pts_to_send = landmarks_pts if self.mesh_enabled else None
+            raw_to_send = landmarks_raw if self.mesh_enabled else None
+            metrics_to_send = metrics if self.mesh_enabled else None
+            self.video.update_frame(frame, pts_to_send, raw_to_send, metrics_to_send, self.mode)
 
-        progress, streak_target = self.gestures.progress()
-        self.progress_ring.set_state(progress, streak_target)
+            state = self.analyzer.get_state()
+            emo = state["emotion"]
+            if emo and emo != "neutral":
+                self.emotion_pill.set_text(emo.upper())
+                self.emotion_pill.show()
+            else:
+                self.emotion_pill.hide()
 
-        self._reposition_overlays()
+            progress, streak_target = self.gestures.progress()
+            self.progress_ring.set_state(progress, streak_target)
+
+            self._reposition_overlays()
+            
         
     def _analyze_face(self, frame, w, h):
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
