@@ -478,47 +478,6 @@ class GlassPill(QWidget):
     def set_color(self, color): self._color = color; self._refresh()
 
 
-class SpeechCaption(QWidget):
-    def __init__(self, parent):
-        super().__init__(parent)
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        self.label = QLabel("")
-        self.label.setWordWrap(True)
-        self.label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        font = QFont("Segoe UI", 24)
-        font.setWeight(QFont.Weight.Black)
-        self.label.setFont(font)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(28, 18, 28, 18)
-        layout.addWidget(self.label)
-        shadow = QGraphicsDropShadowEffect()
-        shadow.setBlurRadius(35); shadow.setColor(QColor(0, 0, 0, 220))
-        shadow.setOffset(0, 5)
-        self.setGraphicsEffect(shadow)
-        self.setStyleSheet("""
-            SpeechCaption {
-                background-color: rgba(0, 0, 0, 190);
-                border: 2px solid rgba(255, 255, 255, 90);
-                border-radius: 24px;
-            }
-        """)
-        self.hide()
-
-    def set_text(self, text):
-        self.label.setText(text)
-        self.label.adjustSize()
-        self.adjustSize()
-        if text:
-            self.show()
-        else:
-            self.hide()
-
-    def set_max_width(self, width):
-        self.label.setMaximumWidth(max(320, width - 56))
-        self.adjustSize()
-
-
 class ProgressRing(QWidget):
     def __init__(self):
         super().__init__()
@@ -874,8 +833,6 @@ class MainWindow(QMainWindow):
         self.caption_pill = GlassPill(AI_IDLE_STATUS, QColor(160, 160, 170))
         self.caption_pill.setParent(self.video)
 
-        self.speech_caption = SpeechCaption(self.video)
-
         self.progress_ring = ProgressRing()
         self.progress_ring.setParent(self.video)
 
@@ -938,7 +895,6 @@ class MainWindow(QMainWindow):
                     print("[DEBUG:APP] Second Shift press - interrupting audio")
                     ai_core.stop_audio()
                     self._post_ui(self._set_ai_status, AI_IDLE_STATUS, QColor(160, 160, 170))
-                    self._post_ui(self._set_speech_caption, "")
                     self.ai_running = False
                 else:
                     print("[DEBUG:APP] Left Shift key pressed - triggering AI call")
@@ -982,7 +938,6 @@ class MainWindow(QMainWindow):
     def trigger_ai(self):
         print("[DEBUG:AI_TRIGGER] Starting AI trigger sequence")
         self._post_ui(self._set_ai_status, AI_LOADING_STATUS, QColor(255, 209, 102))
-        self._post_ui(self._set_speech_caption, "")
         # Gather screenshot, face state, and cached profiles, then call AI in background
         b64 = self.analyzer.capture_person_b64()
         if b64:
@@ -1031,14 +986,12 @@ class MainWindow(QMainWindow):
                     payload,
                     mode=chosen,
                     status_callback=lambda state, text, color: self._post_ui(self._set_ai_status, text, QColor(color) if not isinstance(color, QColor) else color),
-                    caption_callback=lambda text: self._post_ui(self._set_speech_caption, text),
                 )
                 print(f"[DEBUG:AI_TRIGGER] AI response received: {len(res)} chars")
                 print(f"[DEBUG:AI_TRIGGER] Response text: {res[:100]}...")
             finally:
                 self.ai_running = False
                 self._post_ui(self._set_ai_status, AI_IDLE_STATUS, QColor(160, 160, 170))
-                self._post_ui(self._set_speech_caption, "")
                 print("[DEBUG:AI_TRIGGER] AI call complete, resetting flag")
 
         print("[DEBUG:AI_TRIGGER] Spawning background thread")
@@ -1059,9 +1012,6 @@ class MainWindow(QMainWindow):
         self.caption_pill.set_text(text)
         self.caption_pill.set_color(color)
 
-    def _set_speech_caption(self, text):
-        self.speech_caption.set_text(text)
-
     def _reposition(self):
         w, h = self.video.width(), self.video.height()
         margin = 24
@@ -1075,11 +1025,6 @@ class MainWindow(QMainWindow):
         self.caption_pill.adjustSize()
         self.caption_pill.move((w - self.caption_pill.width()) // 2,
                                h - self.caption_pill.height() - margin - 8)
-
-        self.speech_caption.set_max_width(w - 2 * margin)
-        self.speech_caption.adjustSize()
-        self.speech_caption.move((w - self.speech_caption.width()) // 2,
-                                 margin + 10)
 
         self.profile_panel.move(w - self.profile_panel.width() - margin,
                                 h - self.profile_panel.height() - margin)

@@ -137,7 +137,10 @@ def _play_mp3_audio(audio_data):
                     with wave.open(wav_path, 'rb') as wav_file:
                         frames = wav_file.readframes(wav_file.getnframes())
                         sample_rate = wav_file.getframerate()
+                        channels = wav_file.getnchannels()
                         audio_array = np.frombuffer(frames, dtype=np.int16)
+                        if channels > 1:
+                            audio_array = audio_array.reshape(-1, channels)
                         sd.play(audio_array, sample_rate)
                         sd.wait()
                         print("[DEBUG:AI] MP3 played via ffmpeg conversion")
@@ -419,47 +422,25 @@ def call_ai_and_speak(payload: Dict[str, Any], mode: str = "glaze", status_callb
         if eleven_key:
             print(f"[DEBUG:AI] ElevenLabs API key found, calling TTS...")
             eleven = ElevenLabs(api_key=eleven_key)
-            chunks = _split_for_speech(response, max_words=10)
-            if not chunks:
-                chunks = [response]
-
             if status_callback:
                 try:
                     status_callback("speaking", "SPEAKING...", "#7ae582")
                 except Exception as e:
                     print(f"[DEBUG:AI] Status callback failed: {e}")
 
-            for chunk in chunks:
-                if _audio_stop_event.is_set():
-                    print("[DEBUG:AI] Speech stopped before next caption chunk")
-                    break
-                if caption_callback:
-                    try:
-                        caption_callback(chunk)
-                    except Exception as e:
-                        print(f"[DEBUG:AI] Caption callback failed: {e}")
-                audio = eleven.text_to_speech.convert(
-                    text=chunk,
-                    voice_id="gE0owC0H9C8SzfDyIUtB",
-                    model_id="eleven_flash_v2_5",
-                    output_format="mp3_44100_128",
-                    voice_settings={
-                        "stability": 0.5,
-                        "similarity_boost": 0.75,
-                        "speed": 1,
-                    }
-                )
-                print(f"[DEBUG:AI] TTS audio generated for chunk: {chunk[:40]!r}")
-                _play_mp3_audio(audio)
-                if _audio_stop_event.is_set():
-                    print("[DEBUG:AI] Speech interrupted during playback")
-                    break
-
-            if caption_callback and not _audio_stop_event.is_set():
-                try:
-                    caption_callback("")
-                except Exception as e:
-                    print(f"[DEBUG:AI] Caption clear callback failed: {e}")
+            audio = eleven.text_to_speech.convert(
+                text=response,
+                voice_id="gE0owC0H9C8SzfDyIUtB",
+                model_id="eleven_flash_v2_5",
+                output_format="mp3_44100_128",
+                voice_settings={
+                    "stability": 0.5,
+                    "similarity_boost": 0.75,
+                    "speed": 1,
+                }
+            )
+            print(f"[DEBUG:AI] TTS audio generated for full response ({len(response)} chars)")
+            _play_mp3_audio(audio)
             print(f"[DEBUG:AI] Audio playback started")
         else:
             print(f"[DEBUG:AI] No ElevenLabs API key - skipping TTS")
