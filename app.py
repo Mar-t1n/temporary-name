@@ -765,7 +765,7 @@ class MainWindow(QMainWindow):
 
     def keyPressEvent(self, e):
         # Esc and Q always quit, regardless of focus
-        if e.key() in (Qt.Key.Key_Escape):
+        if e.key() == Qt.Key.Key_Escape:
             self.close()
             return
 
